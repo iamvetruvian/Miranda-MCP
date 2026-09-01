@@ -1,0 +1,46 @@
+{
+  "name": "merchant-mcp",
+  "version": "0.1.0",
+  "description": "Drop-in MCP server that makes any merchant transactable by AI buyer agents end-to-end",
+  "main": "dist/server.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "start:sse": "tsx src/server-sse.ts",
+    "dev": "tsx src/server.ts",
+    "demo": "tsx demo/buyer-agent/demo.ts",
+    "demo:live": "tsx demo/buyer-agent/interactive.ts",
+    "demo:marketplace": "tsx demo/marketplace/demo.ts",
+    "validate-manifest": "tsx cli/validate-manifest.ts",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "agentic-commerce",
+    "razorpay",
+    "ai-agent",
+    "merchant"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.6.1",
+    "@types/jsonwebtoken": "^9.0.10",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.3",
+    "razorpay": "^2.9.5",
+    "uuid": "^11.1.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.13.5",
+    "@types/uuid": "^10.0.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.7"
+  }
+}

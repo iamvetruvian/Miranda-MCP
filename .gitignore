@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+*.log
+audit.jsonl
+.DS_Store
+demo/
+manifest.json
