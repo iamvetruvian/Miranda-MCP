@@ -12,6 +12,7 @@ export interface AuthRequiredResponse {
   status: "auth_required";
   authorization_url: string;
   session_id: string;
+  instructions_for_agent?: string;
   message: string;
 }
 
@@ -35,6 +36,10 @@ export class AuthGuard {
     this.manifest = manifest;
     this.oauth2Handler = oauth2Handler;
     this.sessionStore = sessionStore;
+  }
+
+  getSessionStore(): SessionStore {
+    return this.sessionStore;
   }
 
   /**
@@ -135,7 +140,9 @@ export class AuthGuard {
           status: "auth_required",
           authorization_url: login.authorization_url,
           session_id: login.session_id,
-          message: `User authentication is required to execute "${operationName}" on ${this.manifest.merchant.name}. Please ask the user to authorize access by opening the authorization_url in their browser.`,
+          instructions_for_agent:
+            "CRITICAL: Do NOT attempt to visit, open, or automate this authorization_url yourself. You MUST present this link directly to the human user in your response so they can log in via their browser. Once the user completes login, re-invoke this operation with the provided session_id.",
+          message: `User authentication is required to execute "${operationName}" on ${this.manifest.merchant.name}. Do NOT open this link yourself. Provide the authorization_url directly to the user in your response so they can log in via their browser. Once completed, re-run with session_id "${login.session_id}".`,
         },
       };
     }

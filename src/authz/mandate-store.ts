@@ -67,13 +67,11 @@ export class MandateStore {
     this.store = store;
     this.signingSecret =
       signingSecret || process.env.MANDATE_SIGNING_SECRET || "default_mandate_secret_key_mcp";
-    this.authMode =
-      authMode ||
-      ((process.env.MERCHANTMCP_AUTH_MODE?.toLowerCase() === "mandate"
-        ? "mandate"
-        : "none") as "mandate" | "none");
+    const mode = (authMode || process.env.MERCHANTMCP_AUTH_MODE || "none").toLowerCase();
+    this.authMode = mode.startsWith("mandate") ? "mandate" : "none";
+    const callbackPort = Number(process.env.AUTH_CALLBACK_PORT || 3002);
     this.publicBaseUrl =
-      publicBaseUrl || process.env.MCP_PUBLIC_BASE_URL || "http://localhost:3000";
+      publicBaseUrl || process.env.MCP_PUBLIC_BASE_URL || `http://localhost:${callbackPort}`;
   }
 
   isAuthModeEnabled(): boolean {
@@ -82,6 +80,10 @@ export class MandateStore {
 
   setAuthMode(mode: "mandate" | "none"): void {
     this.authMode = mode;
+  }
+
+  setPublicBaseUrl(url: string): void {
+    this.publicBaseUrl = url;
   }
 
   /**
@@ -159,6 +161,7 @@ export class MandateStore {
       principal: {
         user_ref: params.user_ref,
       },
+      user_consent_token: params.user_consent_token,
       constraints: { ...params.constraints },
       nonce: crypto.randomUUID(),
       issued_at: now,
@@ -354,6 +357,15 @@ export class MandateStore {
     return this.pendingChallenges.get(challengeId);
   }
 
+  getConsentChallengeByTransaction(transactionId: string): ConsentChallenge | undefined {
+    for (const challenge of this.pendingChallenges.values()) {
+      if (challenge.transaction_id === transactionId) {
+        return challenge;
+      }
+    }
+    return undefined;
+  }
+
   /**
    * Confirm a Consent Challenge when user approves out-of-band.
    */
@@ -405,6 +417,29 @@ export class MandateStore {
       payment_mandate: signedPayment,
       authorization_reference: mandateId,
       transaction_id: challenge.transaction_id,
+    };
+  }
+
+  /**
+   * Reject a Consent Challenge when user rejects out-of-band.
+   */
+  async rejectConsentChallenge(
+    challengeId: string
+  ): Promise<
+    | { status: "rejected"; transaction_id: string; reason?: string }
+    | { status: "denied"; error: string }
+  > {
+    const challenge = this.pendingChallenges.get(challengeId);
+    if (!challenge) {
+      return { status: "denied", error: "Consent challenge not found or expired" };
+    }
+
+    this.pendingChallenges.delete(challengeId);
+
+    return {
+      status: "rejected",
+      transaction_id: challenge.transaction_id,
+      reason: "User rejected mandate authorization",
     };
   }
 

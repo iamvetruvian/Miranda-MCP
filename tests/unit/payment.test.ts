@@ -77,6 +77,89 @@ describe("RazorpayAdapter", () => {
     const capture = await adapter.capturePayment("pay_sim_999", { amount: 10000, currency: "INR" });
     expect(capture.status).toBe("captured");
   });
+
+  it("should create a customer entity in simulation mode", async () => {
+    const result = await adapter.createCustomer({
+      name: "Autonomous Buyer",
+      email: "agent@example.com",
+      contact: "+919876543210",
+    });
+
+    expect(result.customer_id).toMatch(/^cust_sim_/);
+  });
+
+  it("should charge a recurring token autonomously in simulation mode", async () => {
+    const chargeResult = await adapter.chargeRecurringToken({
+      customer_id: "cust_sim_12345",
+      token_id: "token_sim_abc",
+      amount: { amount: 4999900, currency: "INR" },
+      order_id: "order_sim_98765",
+      email: "buyer@example.com",
+      contact: "+919876543210",
+      description: "Autonomous phone purchase",
+    });
+
+    expect(chargeResult.payment_id).toMatch(/^pay_rec_sim_/);
+    expect(chargeResult.status).toBe("captured");
+    expect(chargeResult.amount).toEqual({ amount: 4999900, currency: "INR" });
+
+    // Verify tracked payment status
+    const status = await adapter.getPaymentStatus(chargeResult.payment_id);
+    expect(status.status).toBe("captured");
+    expect(status.order_id).toBe("order_sim_98765");
+  });
+
+  it("should fetch customer tokens and support simulated tokens", async () => {
+    const customer = await adapter.createCustomer({
+      email: "test@example.com",
+      contact: "+919988776655",
+    });
+
+    const tokens = await adapter.fetchTokensForCustomer(customer.customer_id);
+    expect(tokens.length).toBeGreaterThan(0);
+    expect(tokens[0].token_id).toMatch(/^token_sim_/);
+    expect(tokens[0].method).toBe("upi");
+
+    // Test explicit simulated token injection
+    adapter.simulateCustomerToken("cust_custom_test", {
+      token_id: "token_custom_card_999",
+      method: "card",
+      max_amount: 5000000,
+    });
+
+    const customTokens = await adapter.fetchTokensForCustomer("cust_custom_test");
+    expect(customTokens).toHaveLength(1);
+    expect(customTokens[0].token_id).toBe("token_custom_card_999");
+    expect(customTokens[0].method).toBe("card");
+    expect(customTokens[0].max_amount).toBe(5000000);
+  });
+
+  it("should fail chargeRecurringToken when simulateRecurringFailure is toggled on", async () => {
+    adapter.setSimulateRecurringFailure(true, "Simulated bank downtime");
+
+    await expect(
+      adapter.chargeRecurringToken({
+        customer_id: "cust_fail_test",
+        token_id: "token_fail_test",
+        amount: { amount: 10000, currency: "INR" },
+        order_id: "order_fail_test",
+        email: "fail@example.com",
+        contact: "+919876543210",
+      })
+    ).rejects.toThrow("Simulated bank downtime");
+
+    // Toggle back off -> succeeds
+    adapter.setSimulateRecurringFailure(false);
+    const successRes = await adapter.chargeRecurringToken({
+      customer_id: "cust_fail_test",
+      token_id: "token_fail_test",
+      amount: { amount: 10000, currency: "INR" },
+      order_id: "order_fail_test",
+      email: "fail@example.com",
+      contact: "+919876543210",
+    });
+    expect(successRes.status).toBe("captured");
+  });
 });
 
 describe("Webhook Signature Verification", () => {

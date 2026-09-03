@@ -42,6 +42,7 @@ import { startAuthCallbackServer } from "./auth/callback-server.js";
 import { RateLimiter, AbuseDetector } from "./policy/rate-limit.js";
 import { AuditExporter } from "./audit/exporter.js";
 import { loadRuntimeConfig } from "./config.js";
+import { RecurringTokenStore } from "./payment/token-store.js";
 
 // Load environment variables from cwd and known fallback paths
 dotenv.config();
@@ -65,6 +66,7 @@ export interface CreateServerOptions {
   skipBootVerification?: boolean;
   mandateSigningSecret?: string;
   authMode?: "mandate" | "mandates" | "none";
+  mcpPublicBaseUrl?: string;
   rateLimiter?: RateLimiter;
   abuseDetector?: AbuseDetector;
   auditExporter?: AuditExporter;
@@ -86,6 +88,7 @@ export interface ServerInstance {
   authGuard: AuthGuard;
   rateLimiter: RateLimiter;
   abuseDetector: AbuseDetector;
+  recurringTokenStore: RecurringTokenStore;
 }
 
 /**
@@ -125,10 +128,20 @@ export function createMerchantMcpServer(
   const dbPath = options.dbPath ?? runtimeConfig?.dbPath ?? process.env.MERCHANTMCP_DB_PATH;
   const store = options.store ?? (dbPath ? new SqliteStore(dbPath) : new InMemoryStore());
 
+  let callbackPort = 3002;
+  if (manifest.auth?.oauth2_user?.redirect_uri) {
+    try {
+      const parsed = new URL(manifest.auth.oauth2_user.redirect_uri);
+      if (parsed.port) callbackPort = Number(parsed.port);
+    } catch { }
+  }
+  callbackPort = Number(process.env.AUTH_CALLBACK_PORT || callbackPort);
+
   const mandateStore = new MandateStore(
     store,
     options.mandateSigningSecret ?? runtimeConfig?.mandateSigningSecret,
-    (options.authMode as any) ?? runtimeConfig?.authMode
+    (options.authMode as any) ?? runtimeConfig?.authMode,
+    options.mcpPublicBaseUrl ?? runtimeConfig?.mcpPublicBaseUrl ?? process.env.MCP_PUBLIC_BASE_URL ?? `http://localhost:${callbackPort}`
   );
 
   const sessionStore = new SessionStore(store, manifest.auth?.oauth2_user?.session_ttl_seconds);
@@ -136,6 +149,7 @@ export function createMerchantMcpServer(
     ? new OAuth2Handler(manifest.auth.oauth2_user, sessionStore)
     : null;
   const authGuard = new AuthGuard(manifest, oauth2Handler, sessionStore);
+  const recurringTokenStore = new RecurringTokenStore();
 
   const connector =
     (manifest as any).integration?.type === "ucp_native"
@@ -226,6 +240,10 @@ export function createMerchantMcpServer(
     // 7. Hydrate user sessions
     const sessions = store.loadSessionsSync();
     sessionStore.hydrate(sessions);
+
+    // 8. Hydrate recurring tokens
+    const recurringTokens = store.loadRecurringTokensSync ? store.loadRecurringTokensSync() : [];
+    recurringTokenStore.hydrate(recurringTokens);
   }
   setRefinementStore(store);
 
@@ -251,7 +269,7 @@ export function createMerchantMcpServer(
   registerRefinementTools(server, connector, auditLedger);
   registerMandateTools(server, mandateStore, auditLedger);
   registerAuthTools(server, sessionStore, authGuard, manifest, oauth2Handler, auditLedger);
-  registerTransactionTools(server, connector, txnManager, policyEngine, paymentAdapter, auditLedger, mandateStore, authGuard);
+  registerTransactionTools(server, connector, txnManager, policyEngine, paymentAdapter, auditLedger, mandateStore, authGuard, recurringTokenStore);
 
   return {
     server,
@@ -268,6 +286,7 @@ export function createMerchantMcpServer(
     authGuard,
     rateLimiter,
     abuseDetector,
+    recurringTokenStore,
   };
 }
 
@@ -300,7 +319,7 @@ async function main() {
     process.exit(1);
   }
 
-  const { server, connector, txnManager, auditLedger, oauth2Handler } = createMerchantMcpServer(
+  const { server, connector, txnManager, auditLedger, oauth2Handler, paymentAdapter, recurringTokenStore, mandateStore, sessionStore } = createMerchantMcpServer(
     manifest,
     {
       auditLogFile: process.env.AUDIT_LOG_FILE || path.resolve(process.cwd(), "audit.jsonl"),
@@ -322,6 +341,10 @@ async function main() {
       txnManager,
       connector,
       auditLedger,
+      paymentAdapter,
+      recurringTokenStore,
+      mandateStore,
+      sessionStore,
     });
   }
 

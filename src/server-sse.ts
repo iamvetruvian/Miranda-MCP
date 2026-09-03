@@ -17,12 +17,18 @@ import { registerDiscoveryTools } from "./tools/discovery.js";
 import { registerRefinementTools } from "./tools/refinement.js";
 import { registerTransactionTools } from "./tools/transaction.js";
 import { startWebhookServer } from "./payment/webhook.js";
+import { TransactionState } from "./types/index.js";
 import { PersistenceStore, InMemoryStore } from "./persistence/store.js";
 import { SqliteStore } from "./persistence/sqlite.js";
 import { setRefinementStore, hydrateSearchStates } from "./tools/refinement.js";
 import { MandateStore } from "./authz/mandate-store.js";
 import { registerMandateTools } from "./tools/mandate.js";
-import { consentGrantedEvent } from "./audit/events.js";
+import {
+  consentGrantedEvent,
+  consentRejectedEvent,
+  paymentOrderCreatedEvent,
+  paymentLinkGeneratedEvent,
+} from "./audit/events.js";
 
 import { SessionStore } from "./auth/session-store.js";
 import { OAuth2Handler } from "./auth/oauth2-handler.js";
@@ -33,6 +39,7 @@ import { RateLimiter, AbuseDetector, createRateLimitMiddleware } from "./policy/
 import { AuditExporter } from "./audit/exporter.js";
 import { loadRuntimeConfig } from "./config.js";
 import { listenWithPortRecovery } from "./utils/dev-port-killer.js";
+import { RecurringTokenStore } from "./payment/token-store.js";
 
 dotenv.config();
 
@@ -46,6 +53,9 @@ export interface SseServerResult {
   authGuard: AuthGuard;
   rateLimiter: RateLimiter;
   abuseDetector: AbuseDetector;
+  recurringTokenStore: RecurringTokenStore;
+  txnManager: TransactionManager;
+  auditLedger: AuditLedger;
 }
 
 export interface HostedServerOptions {
@@ -102,6 +112,7 @@ export function startHostedMerchantMcpServer(
     ? new OAuth2Handler(manifest.auth.oauth2_user, sessionStore)
     : null;
   const authGuard = new AuthGuard(manifest, oauth2Handler, sessionStore);
+  const recurringTokenStore = new RecurringTokenStore();
 
   const app = express();
   app.use(express.json());
@@ -204,6 +215,9 @@ export function startHostedMerchantMcpServer(
 
     const sessions = store.loadSessionsSync();
     sessionStore.hydrate(sessions);
+
+    const recurringTokens = store.loadRecurringTokensSync ? store.loadRecurringTokensSync() : [];
+    recurringTokenStore.hydrate(recurringTokens);
   }
   setRefinementStore(store);
 
@@ -232,7 +246,7 @@ export function startHostedMerchantMcpServer(
     registerRefinementTools(sessionServer, connector, auditLedger);
     registerMandateTools(sessionServer, mandateStore, auditLedger);
     registerAuthTools(sessionServer, sessionStore, authGuard, manifest, oauth2Handler, auditLedger);
-    registerTransactionTools(sessionServer, connector, txnManager, policyEngine, paymentAdapter, auditLedger, mandateStore, authGuard);
+    registerTransactionTools(sessionServer, connector, txnManager, policyEngine, paymentAdapter, auditLedger, mandateStore, authGuard, recurringTokenStore);
 
     const transport = new SSEServerTransport(messageEndpoint, res);
     transports[transport.sessionId] = transport;
@@ -392,14 +406,90 @@ export function startHostedMerchantMcpServer(
     }
   });
 
-  // ── Human Consent Endpoints (Mode B JIT Approval) ───────────────────────────
+  // ── Human Consent Endpoints (Mode B JIT Approval & Path 3 Fallback) ────────
   app.get("/consent/:challengeId", (req: Request, res: Response) => {
     const challengeId = req.params.challengeId as string;
     const challenge = mandateStore.getConsentChallenge(challengeId);
     if (!challenge) {
+      if (req.headers.accept?.includes("text/html")) {
+        res.status(404).send(`
+          <!DOCTYPE html>
+          <html>
+            <head><title>Consent Challenge Not Found - ${manifest.merchant.name}</title></head>
+            <body style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0;">
+              <div style="background: #1e293b; padding: 2rem; border-radius: 12px; max-width: 480px; text-align: center; border: 1px solid #ef4444;">
+                <h2 style="color: #ef4444;">Consent Challenge Not Found or Expired</h2>
+                <p style="color: #94a3b8;">This consent request is invalid or has already expired.</p>
+              </div>
+            </body>
+          </html>
+        `);
+        return;
+      }
       res.status(404).json({ error: "Consent challenge not found or expired" });
       return;
     }
+
+    if (req.headers.accept?.includes("text/html")) {
+      const formattedAmount = (challenge.amount / 100).toFixed(2);
+      res.send(`
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <title>Authorize Payment Mandate - ${manifest.merchant.name}</title>
+            <style>
+              body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 1rem; box-sizing: border-box; }
+              .card { background: #1e293b; padding: 2rem; border-radius: 16px; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.4); max-width: 500px; width: 100%; border: 1px solid #334155; }
+              h1 { color: #f8fafc; margin: 0 0 0.5rem 0; font-size: 1.4rem; text-align: center; }
+              .merchant { color: #38bdf8; font-weight: 600; }
+              .desc { color: #94a3b8; font-size: 0.9rem; text-align: center; margin-bottom: 1.5rem; line-height: 1.4; }
+              .details { background: #0f172a; border-radius: 10px; padding: 1.25rem; margin-bottom: 1.5rem; border: 1px solid #334155; }
+              .row { display: flex; justify-content: space-between; margin-bottom: 0.75rem; font-size: 0.9rem; }
+              .row:last-child { margin-bottom: 0; }
+              .label { color: #94a3b8; }
+              .value { font-weight: 600; color: #f8fafc; }
+              .amount { font-size: 1.3rem; color: #22c55e; }
+              .actions { display: flex; gap: 0.75rem; flex-direction: column; }
+              button { width: 100%; padding: 0.85rem; border-radius: 8px; font-size: 0.95rem; font-weight: 600; cursor: pointer; border: none; transition: all 0.2s; }
+              .btn-approve { background: #22c55e; color: #022c22; }
+              .btn-approve:hover { background: #16a34a; }
+              .btn-reject { background: #334155; color: #f8fafc; border: 1px solid #475569; }
+              .btn-reject:hover { background: #475569; }
+            </style>
+          </head>
+          <body>
+            <div class="card">
+              <h1>Authorize Payment Mandate</h1>
+              <p class="desc">Your AI assistant is requesting authorization to make a purchase at <span class="merchant">${manifest.merchant.name}</span>.</p>
+              <div class="details">
+                <div class="row">
+                  <span class="label">Payee:</span>
+                  <span class="value">${challenge.payee}</span>
+                </div>
+                <div class="row">
+                  <span class="label">Checkout ID:</span>
+                  <span class="value">${challenge.checkout_id}</span>
+                </div>
+                <div class="row">
+                  <span class="label">Total Amount:</span>
+                  <span class="value amount">₹${formattedAmount} ${challenge.currency}</span>
+                </div>
+              </div>
+              <div class="actions">
+                <form method="POST" action="/consent/${challengeId}/confirm">
+                  <button type="submit" class="btn-approve">Approve Autonomous Mandate</button>
+                </form>
+                <form method="POST" action="/consent/${challengeId}/reject">
+                  <button type="submit" class="btn-reject">Reject Mandate & Pay Manually</button>
+                </form>
+              </div>
+            </div>
+          </body>
+        </html>
+      `);
+      return;
+    }
+
     res.json({
       challenge_id: challenge.challenge_id,
       transaction_id: challenge.transaction_id,
@@ -434,6 +524,25 @@ export function startHostedMerchantMcpServer(
       );
     }
 
+    if (req.headers.accept?.includes("text/html") || req.is("application/x-www-form-urlencoded")) {
+      res.send(`
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <title>Mandate Approved - ${manifest.merchant.name}</title>
+            <body style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0;">
+              <div style="background: #1e293b; padding: 2.5rem; border-radius: 16px; max-width: 480px; text-align: center; border: 1px solid #22c55e;">
+                <div style="font-size: 3rem; color: #22c55e; margin-bottom: 1rem;">✓</div>
+                <h1 style="margin: 0 0 0.5rem 0; font-size: 1.5rem;">Mandate Approved</h1>
+                <p style="color: #94a3b8; line-height: 1.5;">Your payment mandate has been authorized. You can close this window; your AI agent will finalize your purchase.</p>
+              </div>
+            </body>
+          </head>
+        </html>
+      `);
+      return;
+    }
+
     res.json({
       status: "authorized",
       mandate_id: result.payment_mandate.mandate.mandate_id,
@@ -442,22 +551,131 @@ export function startHostedMerchantMcpServer(
     });
   });
 
-  app.post("/consent/:challengeId/deny", (req: Request, res: Response) => {
+  const handleConsentRejection = async (req: Request, res: Response) => {
     const challengeId = req.params.challengeId as string;
-    const challenge = mandateStore.getConsentChallenge(challengeId);
-    if (!challenge) {
-      res.status(404).json({ error: "Consent challenge not found or expired" });
+    const result = await mandateStore.rejectConsentChallenge(challengeId);
+
+    if (result.status === "denied") {
+      res.status(404).json({ error: result.error });
       return;
     }
-    if (txnManager.has(challenge.transaction_id)) {
-      txnManager.fail(
-        challenge.transaction_id,
-        "User denied consent challenge",
-        "user_consent_surface"
+
+    const txnId = result.transaction_id;
+    let fallbackPaymentUrl: string | undefined;
+
+    if (txnManager.has(txnId)) {
+      const txn = txnManager.get(txnId);
+      auditLedger.append(
+        consentRejectedEvent(txnId, {
+          challenge_id: challengeId,
+          rejected_at: new Date().toISOString(),
+          reason: result.reason || "User rejected mandate authorization",
+        })
       );
+
+      // Path 3 Fallback: Generate a manual hosted payment link if checkout exists
+      if (txn.merchant_verified) {
+        try {
+          // 1. Create order if not already created
+          let orderId = txn.payment?.razorpay_order_id;
+          if (!orderId) {
+            const orderResult = await paymentAdapter.createOrder({
+              amount: txn.merchant_verified.total,
+              receipt: txnId,
+              notes: { transaction_id: txnId, customer_id: txn.customer_id || "" },
+              manifestPaymentConfig: manifest.payment,
+            });
+            orderId = orderResult.order_id;
+            auditLedger.append(
+              paymentOrderCreatedEvent(txnId, {
+                order_id: orderId,
+                amount: txn.merchant_verified.total.amount,
+                currency: txn.merchant_verified.total.currency,
+              })
+            );
+          }
+
+          // 2. Generate Razorpay Payment Link
+          const linkResult = await paymentAdapter.createPaymentLink({
+            amount: txn.merchant_verified.total,
+            description: `Manual Payment: ${txn.merchant_verified.title || txn.merchant_verified.sku}`,
+            reference_id: txnId,
+            order_id: orderId,
+            customer: txn.payment?.customer_email || txn.payment?.customer_contact ? {
+              email: txn.payment.customer_email,
+              contact: txn.payment.customer_contact,
+            } : undefined,
+            manifestPaymentConfig: manifest.payment,
+          });
+
+          fallbackPaymentUrl = linkResult.short_url;
+
+          auditLedger.append(
+            paymentLinkGeneratedEvent(txnId, {
+              payment_link_id: linkResult.payment_link_id,
+              short_url: linkResult.short_url,
+              amount: txn.merchant_verified.total.amount,
+            })
+          );
+
+          // 3. Bind manual payment link and transition to PAYMENT_PENDING
+          txnManager.bindPayment(txnId, {
+            provider: "razorpay",
+            payment_method: "payment_link",
+            razorpay_order_id: orderId,
+            payment_link_id: linkResult.payment_link_id,
+            payment_link_url: linkResult.short_url,
+            payment_status: "pending",
+            customer_id: txn.customer_id,
+          });
+
+          txnManager.transition(txnId, TransactionState.PAYMENT_PENDING, "consent_rejected_manual_payment_link_generated");
+        } catch (linkErr) {
+          console.error("[Consent] Failed to generate fallback payment link:", linkErr);
+          txnManager.fail(txnId, "Consent rejected and failed to generate payment link", "consent_broker");
+        }
+      } else {
+        txnManager.fail(txnId, "Consent rejected by user", "consent_broker");
+      }
     }
-    res.json({ status: "denied", message: "Consent challenge denied" });
-  });
+
+    if (req.headers.accept?.includes("text/html") || req.is("application/x-www-form-urlencoded")) {
+      res.send(`
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <title>Mandate Rejected - Pay Manually</title>
+            <style>
+              body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+              .card { background: #1e293b; padding: 2.5rem; border-radius: 16px; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.3); max-width: 480px; text-align: center; border: 1px solid #f59e0b; }
+              h1 { color: #f59e0b; margin: 0 0 0.5rem 0; font-size: 1.4rem; }
+              p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0.5rem 0 1.5rem 0; }
+              .btn-pay { display: inline-block; background: #38bdf8; color: #082f49; padding: 0.85rem 1.5rem; border-radius: 8px; font-weight: 600; text-decoration: none; transition: background 0.2s; }
+              .btn-pay:hover { background: #0284c7; }
+            </style>
+          </head>
+          <body>
+            <div class="card">
+              <h1>Mandate Rejected</h1>
+              <p>You chose to pay manually. You can complete your purchase using the hosted Razorpay link below:</p>
+              ${fallbackPaymentUrl ? `<a href="${fallbackPaymentUrl}" class="btn-pay" target="_blank">Open Payment Link</a>` : "<p>Please return to your chat assistant.</p>"}
+            </div>
+          </body>
+        </html>
+      `);
+      return;
+    }
+
+    res.json({
+      status: "fallback_to_payment_link",
+      message: "Mandate rejected by user. A manual payment link has been generated.",
+      transaction_id: txnId,
+      payment_url: fallbackPaymentUrl,
+    });
+  };
+
+  app.post("/consent/:challengeId/reject", handleConsentRejection);
+  app.post("/consent/:challengeId/deny", handleConsentRejection);
 
   // ── Health check ─────────────────────────────────────────────────────────────
   app.get("/health", (_req: Request, res: Response) => {
@@ -510,6 +728,9 @@ export function startHostedMerchantMcpServer(
     authGuard,
     rateLimiter,
     abuseDetector,
+    recurringTokenStore,
+    txnManager,
+    auditLedger,
   };
 }
 

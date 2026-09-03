@@ -24,7 +24,7 @@ export function registerAuthTools(
   // ─── check_auth_status ───────────────────────────────────────────────────────
   server.tool(
     "check_auth_status",
-    "Check current user authentication status with this merchant. Returns whether an active user session exists, user profile info, or an authorization URL if unauthenticated.",
+    "Check current user authentication status with this merchant. Returns whether an active user session exists, user profile info, or an authorization URL if unauthenticated. CRITICAL: If an authorization_url is returned, the agent must NOT open or automate it; present the link directly to the human user in the response.",
     {
       session_id: z
         .string()
@@ -54,6 +54,8 @@ export function registerAuthTools(
             session_id: session.session_id,
             user_id: freshSession?.user_id,
             user_name: freshSession?.user_name,
+            user_email: freshSession?.user_email,
+            user_contact: freshSession?.user_contact,
             session_expires_at: freshSession
               ? new Date(freshSession.session_expires_at).toISOString()
               : undefined,
@@ -79,7 +81,9 @@ export function registerAuthTools(
           authenticated: false,
           authorization_url: login.authorization_url,
           session_id: login.session_id,
-          message: `User is not currently authenticated with ${manifest.merchant.name}. Please direct the user to authorize access by visiting the provided authorization_url.`,
+          instructions_for_agent:
+            "CRITICAL: Do NOT attempt to visit, open, or automate this authorization_url yourself via browser tools. You MUST present this link directly to the human user in your response message so they can log in via their browser.",
+          message: `User is not currently authenticated with ${manifest.merchant.name}. Do NOT open this URL yourself. Provide this authorization_url directly to the user in your message so they can authorize access in their browser.`,
         };
 
         if (auditLedger) {
@@ -109,7 +113,7 @@ export function registerAuthTools(
   // ─── request_login ──────────────────────────────────────────────────────────
   server.tool(
     "request_login",
-    "Request a merchant OAuth2 authorization URL for the user to log in or link their account.",
+    "Request a merchant OAuth2 authorization URL for the user to log in or link their account. Returns an authorization_url. CRITICAL: The agent must NOT open or automate this URL; present it directly to the human user in the response.",
     {},
     async (params) => {
       const trackId = `auth_login_${Date.now()}`;
@@ -140,7 +144,9 @@ export function registerAuthTools(
         status: "login_initiated",
         authorization_url: login.authorization_url,
         session_id: login.session_id,
-        message: `Please ask the user to open this authorization_url in their browser to log in to ${manifest.merchant.name}. Once completed, subsequent operations using session_id "${login.session_id}" will be authorized.`,
+        instructions_for_agent:
+          "CRITICAL: Do NOT attempt to visit, open, or automate this authorization_url yourself via browser tools. You MUST present this link directly to the human user in your response message so they can log in via their browser.",
+        message: `Do NOT open this URL yourself. Provide this authorization_url directly to the human user in your response so they can log in to ${manifest.merchant.name} in their browser. Once completed, subsequent operations using session_id "${login.session_id}" will be authorized.`,
       };
 
       if (auditLedger) {

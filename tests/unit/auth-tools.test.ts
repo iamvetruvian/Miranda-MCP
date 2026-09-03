@@ -141,6 +141,7 @@ describe("Auth Tools & Tool Layer Integration", () => {
     expect(parsed.authenticated).toBe(false);
     expect(parsed.authorization_url).toContain("https://api.oauth2shop.com/oauth/authorize");
     expect(parsed.session_id).toMatch(/^sess_/);
+    expect(parsed.instructions_for_agent).toContain("Do NOT attempt to visit, open, or automate this authorization_url yourself");
   });
 
   it("check_auth_status should return authenticated info when active session exists", async () => {
@@ -169,6 +170,7 @@ describe("Auth Tools & Tool Layer Integration", () => {
     expect(parsed.status).toBe("login_initiated");
     expect(parsed.authorization_url).toContain("https://api.oauth2shop.com/oauth/authorize");
     expect(parsed.session_id).toMatch(/^sess_/);
+    expect(parsed.instructions_for_agent).toContain("Do NOT attempt to visit, open, or automate this authorization_url yourself");
 
     const pendingSession = sessionStore.getSession(parsed.session_id);
     expect(pendingSession?.status).toBe("pending");

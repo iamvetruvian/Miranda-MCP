@@ -530,7 +530,7 @@ export function registerDiscoveryTools(
                   ? "OAuth 2.0 Authorization Code (RFC 6749 + PKCE)"
                   : manifest.auth.type,
               instructions:
-                "To purchase an item or checkout, call prepare_purchase directly. You do not need an existing session_id. If login is required, the server returns an authorization_url for the user.",
+                "To purchase an item or checkout, call prepare_purchase directly. You do not need an existing session_id. If login is required, the server returns an authorization_url for the user. CRITICAL: When authorization_url, payment URLs, or consent_url are returned, do NOT open or automate them yourself; present them directly to the human user in the chat response.",
             }
           : undefined,
       };

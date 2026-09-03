@@ -315,11 +315,20 @@ export interface RefundRecord {
 
 export interface PaymentBinding {
   provider: "razorpay";
+  payment_method?: "payment_link" | "recurring_token";
   razorpay_order_id?: string;
   razorpay_payment_id?: string;
   payment_link_url?: string;
   payment_link_id?: string;
+  one_time_payment_url?: string;
+  autopay_mandate_url?: string;
+  razorpay_mandate_order_id?: string;
   payment_status: "pending" | "authorized" | "captured" | "failed";
+  customer_id?: string;
+  customer_email?: string;
+  customer_contact?: string;
+  recurring_token_id?: string;
+  token_captured?: boolean;
   refunds?: RefundRecord[];
   refunded_amount?: number;
 }
@@ -350,6 +359,10 @@ export interface Transaction {
   policy_decision?: PolicyDecision;
   /** Mandate authorization reference (AP2) */
   authorization_reference?: string;
+  /** Customer ID associated with this transaction for tokenization */
+  customer_id?: string;
+  /** Flag indicating whether recurring token was captured */
+  token_captured?: boolean;
   /** Ordered list of audit event IDs associated with this transaction */
   audit_event_ids: string[];
 }
@@ -404,6 +417,10 @@ export enum AuditEventType {
   MANDATE_REJECTED           = "MANDATE_REJECTED",
   CONSENT_CHALLENGED         = "CONSENT_CHALLENGED",
   CONSENT_GRANTED            = "CONSENT_GRANTED",
+  CONSENT_REJECTED           = "CONSENT_REJECTED",
+  RECURRING_TOKEN_CAPTURED   = "RECURRING_TOKEN_CAPTURED",
+  RECURRING_PAYMENT_CHARGED  = "RECURRING_PAYMENT_CHARGED",
+  RECURRING_PAYMENT_FAILED   = "RECURRING_PAYMENT_FAILED",
   RATE_LIMITED               = "RATE_LIMITED",
   AGENT_FLAGGED              = "AGENT_FLAGGED",
 }

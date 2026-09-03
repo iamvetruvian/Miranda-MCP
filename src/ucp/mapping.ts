@@ -40,7 +40,11 @@ export function projectUcpEnvelope(
   const actions: Record<string, UcpAction[]> = { ...extraActions };
 
   // If transaction is in MANDATE_EVALUATED and has pending consent details, embed action
-  if (txn.state === TransactionState.MANDATE_EVALUATED && !actions["com.merchantmcp.mandates.consent"]) {
+  if (
+    txn.state === TransactionState.MANDATE_EVALUATED &&
+    !txn.authorization_reference &&
+    !actions["com.merchantmcp.mandates.consent"]
+  ) {
     actions["com.merchantmcp.mandates.consent"] = [
       {
         id: `consent_${txn.transaction_id}`,

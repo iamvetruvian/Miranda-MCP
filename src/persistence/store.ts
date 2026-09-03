@@ -9,6 +9,7 @@
 import { Transaction, AuditEvent } from "../types/index.js";
 import { LedgerCheckpoint } from "../audit/ledger.js";
 import { SearchStateRecord } from "../tools/refinement.js";
+import { RecurringToken } from "../payment/token-store.js";
 
 export interface ActiveGateToken {
   token: string;
@@ -49,6 +50,12 @@ export interface PersistenceStore {
   deleteSession(sessionId: string): Promise<void>;
   loadSessionsSync(): import("../auth/session-store.js").UserSession[];
 
+  // Recurring tokens (Razorpay autonomous payment tokens)
+  loadRecurringTokens(): Promise<RecurringToken[]>;
+  saveRecurringToken(token: RecurringToken): Promise<void>;
+  deleteRecurringToken(customerId: string): Promise<void>;
+  loadRecurringTokensSync?(): RecurringToken[];
+
   close(): Promise<void>;
 }
 
@@ -65,6 +72,7 @@ export class InMemoryStore implements PersistenceStore {
   private searchStates: Map<string, SearchStateRecord> = new Map();
   private mandates: Map<string, any> = new Map();
   private sessions: Map<string, import("../auth/session-store.js").UserSession> = new Map();
+  private recurringTokens: Map<string, RecurringToken> = new Map();
 
   async loadTransactions(): Promise<Transaction[]> {
     return Array.from(this.transactions.values()).map((t) => JSON.parse(JSON.stringify(t)));
@@ -144,6 +152,18 @@ export class InMemoryStore implements PersistenceStore {
     this.sessions.delete(sessionId);
   }
 
+  async loadRecurringTokens(): Promise<RecurringToken[]> {
+    return Array.from(this.recurringTokens.values()).map((t) => JSON.parse(JSON.stringify(t)));
+  }
+
+  async saveRecurringToken(token: RecurringToken): Promise<void> {
+    this.recurringTokens.set(token.customer_id, JSON.parse(JSON.stringify(token)));
+  }
+
+  async deleteRecurringToken(customerId: string): Promise<void> {
+    this.recurringTokens.delete(customerId);
+  }
+
   loadTransactionsSync(): Transaction[] {
     return Array.from(this.transactions.values()).map((t) => JSON.parse(JSON.stringify(t)));
   }
@@ -170,6 +190,10 @@ export class InMemoryStore implements PersistenceStore {
 
   loadSessionsSync(): import("../auth/session-store.js").UserSession[] {
     return Array.from(this.sessions.values()).map((s) => JSON.parse(JSON.stringify(s)));
+  }
+
+  loadRecurringTokensSync(): RecurringToken[] {
+    return Array.from(this.recurringTokens.values()).map((t) => JSON.parse(JSON.stringify(t)));
   }
 
   async close(): Promise<void> {

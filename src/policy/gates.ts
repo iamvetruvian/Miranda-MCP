@@ -180,12 +180,13 @@ export class TransactionStateGate implements PolicyGate {
   readonly name = "TransactionStateGate";
 
   private allowedStatesForAction: Record<string, TransactionState[]> = {
-    CREATE_PAYMENT: [TransactionState.CHECKOUT_CREATED],
+    CREATE_PAYMENT: [TransactionState.CHECKOUT_CREATED, TransactionState.MANDATE_EVALUATED],
     CAPTURE_PAYMENT: [TransactionState.PAYMENT_PENDING, TransactionState.PAYMENT_AUTHORIZED],
     CONFIRM_ORDER: [TransactionState.PAYMENT_AUTHORIZED],
     CANCEL: [
       TransactionState.CREATED,
       TransactionState.CHECKOUT_CREATED,
+      TransactionState.MANDATE_EVALUATED,
       TransactionState.PAYMENT_PENDING,
       TransactionState.PAYMENT_AUTHORIZED,
       TransactionState.ORDER_CONFIRMED,
@@ -212,6 +213,19 @@ export class TransactionStateGate implements PolicyGate {
         gate: this.name,
         result: "PASS",
         detail: `State "${txn.state}" acceptable for action "${action}"`,
+      };
+    }
+
+    // Allow refund or cancel on FAILED transactions if money was actually captured
+    if (
+      (action === "REQUEST_REFUND" || action === "CANCEL") &&
+      txn.state === TransactionState.FAILED &&
+      (txn.payment?.payment_status === "captured" || txn.payment?.payment_status === "authorized")
+    ) {
+      return {
+        gate: this.name,
+        result: "PASS",
+        detail: `Action "${action}" allowed for FAILED transaction with captured payment`,
       };
     }
 
@@ -387,6 +401,13 @@ export class MandateGate implements PolicyGate {
 
     const ref = (context?.authorization_reference as string) || txn.authorization_reference;
     if (!ref) {
+      if (context?.bypass_mandate_for_manual_link === true) {
+        return {
+          gate: this.name,
+          result: "PASS",
+          detail: "Manual hosted payment link — mandate reference not required",
+        };
+      }
       return {
         gate: this.name,
         result: "FAIL",

@@ -177,7 +177,9 @@ describe("MerchantMCP Server & Tools Integration", () => {
     txnManager.transition(txnId, TransactionState.CHECKOUT_CREATED, "checkout_created");
 
     // Policy Gating
-    const policyDecision = policyEngine.evaluate(txnManager.get(txnId), "CREATE_PAYMENT");
+    const policyDecision = policyEngine.evaluate(txnManager.get(txnId), "CREATE_PAYMENT", {
+      bypass_mandate_for_manual_link: true,
+    });
     expect(policyDecision.decision).toBe("ALLOW");
     txnManager.bindPolicyDecision(txnId, policyDecision);
 

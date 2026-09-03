@@ -13,6 +13,9 @@ export interface UserSession {
   refresh_token?: string;          // OAuth2 refresh token (never exposed to agent)
   user_id?: string;                // Extracted user ID (optional)
   user_name?: string;              // Display name (optional)
+  user_email?: string;             // User email from profile / auth
+  user_contact?: string;           // User contact / phone number
+  customer_id?: string;            // Associated payment gateway customer ID (e.g. "cust_...")
   authenticated_at: number;        // Unix timestamp ms
   token_expires_at?: number;       // When the access token expires (Unix ms)
   session_expires_at: number;      // When the entire session expires (Unix ms) — merchant TTL
@@ -30,6 +33,9 @@ export interface OAuth2Tokens {
 export interface UserInfo {
   user_id?: string;
   user_name?: string;
+  user_email?: string;
+  user_contact?: string;
+  customer_id?: string;
 }
 
 export const DEFAULT_SESSION_TTL_SECONDS = 2592000; // 30 days default
@@ -92,6 +98,9 @@ export class SessionStore {
       refresh_token: tokens.refresh_token ?? existing?.refresh_token,
       user_id: userInfo?.user_id ?? existing?.user_id,
       user_name: userInfo?.user_name ?? existing?.user_name,
+      user_email: userInfo?.user_email ?? existing?.user_email,
+      user_contact: userInfo?.user_contact ?? existing?.user_contact,
+      customer_id: userInfo?.customer_id ?? existing?.customer_id,
       authenticated_at: now,
       token_expires_at: tokens.expires_in ? now + tokens.expires_in * 1000 : undefined,
       session_expires_at: now + effectiveTtl * 1000,
@@ -105,6 +114,19 @@ export class SessionStore {
     });
 
     return { ...session };
+  }
+
+  /**
+   * Bind a payment gateway customer ID to a session.
+   */
+  attachCustomerId(sessionId: string, customerId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      session.customer_id = customerId;
+      this.store.saveSession(session).catch((err) => {
+        console.error("[SessionStore] Error updating session customer_id:", err);
+      });
+    }
   }
 
   /**

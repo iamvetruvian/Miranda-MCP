@@ -17,11 +17,13 @@ export const VALID_TRANSITIONS: Record<TransactionState, TransactionState[]> = {
   [TransactionState.CHECKOUT_CREATED]: [
     TransactionState.MANDATE_EVALUATED,
     TransactionState.PAYMENT_PENDING,
+    TransactionState.PAYMENT_AUTHORIZED,
     TransactionState.FAILED,
     TransactionState.CANCELLED,
   ],
   [TransactionState.MANDATE_EVALUATED]: [
     TransactionState.PAYMENT_PENDING,
+    TransactionState.PAYMENT_AUTHORIZED,
     TransactionState.FAILED,
     TransactionState.CANCELLED,
   ],

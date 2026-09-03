@@ -99,6 +99,7 @@ describe("AuthGuard", () => {
     expect(result.auth_required_response?.authorization_url).toContain("http://localhost:5000/oauth/authorize");
     expect(result.auth_required_response?.session_id).toMatch(/^sess_/);
     expect(result.auth_required_response?.message).toContain("ProShop");
+    expect(result.auth_required_response?.instructions_for_agent).toContain("Do NOT attempt to visit, open, or automate this authorization_url yourself");
   });
 
   it("should authorize protected operations when valid session_id is provided", async () => {

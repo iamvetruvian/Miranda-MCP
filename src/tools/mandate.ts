@@ -17,7 +17,9 @@ export function registerMandateTools(
 ): void {
   server.tool(
     "create_mandate",
-    "Create an AP2 Intent Mandate that authorizes a class of purchases within explicit bounds (maximum amount, currency, domain, expiration). Returns an authorization reference to supply to prepare_purchase.",
+    "Create an AP2 Intent Mandate for advance budgetary spending limits (e.g. daily/weekly spending caps). " +
+    "CRITICAL: Do NOT invoke this tool for standard purchases when an autopay recurring token is already registered. " +
+    "Instead, call prepare_purchase directly without an authorization_reference — the MCP server will automatically issue an AP2 consent challenge (consent_url) for the user to review and authorize the purchase in their browser.",
     {
       user_ref: z.string().describe("Opaque user reference identifier (e.g. user_session_123)"),
       max_amount: z.number().int().positive().describe("Maximum allowed checkout total in currency sub-units (paise / cents), e.g. 8000000 for ₹80,000"),

@@ -150,7 +150,9 @@ describe("Durability Integration Tests (Crash & Restart Recovery)", () => {
     instance1.txnManager.transition(txnId, TransactionState.CHECKOUT_CREATED, "checkout_created");
 
     // Evaluate policy
-    const policyDecision = instance1.policyEngine.evaluate(instance1.txnManager.get(txnId), "CREATE_PAYMENT");
+    const policyDecision = instance1.policyEngine.evaluate(instance1.txnManager.get(txnId), "CREATE_PAYMENT", {
+      bypass_mandate_for_manual_link: true,
+    });
     expect(policyDecision.decision).toBe("ALLOW");
     instance1.txnManager.bindPolicyDecision(txnId, policyDecision);
 

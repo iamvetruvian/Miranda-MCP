@@ -10,6 +10,7 @@ import { Transaction, AuditEvent } from "../types/index.js";
 import { LedgerCheckpoint } from "../audit/ledger.js";
 import { SearchStateRecord } from "../tools/refinement.js";
 import { UserSession } from "../auth/session-store.js";
+import { RecurringToken } from "../payment/token-store.js";
 import { PersistenceStore, type ActiveGateToken } from "./store.js";
 
 export class SqliteStore implements PersistenceStore {
@@ -112,6 +113,18 @@ export class SqliteStore implements PersistenceStore {
         data TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_sessions_expires ON user_sessions(session_expires_at);
+    `);
+
+    // Recurring tokens table (Razorpay autonomous payment tokens)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS recurring_tokens (
+        customer_id TEXT PRIMARY KEY,
+        token_id TEXT NOT NULL,
+        method TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        data TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_recurring_tokens_token_id ON recurring_tokens(token_id);
     `);
   }
 
@@ -279,6 +292,35 @@ export class SqliteStore implements PersistenceStore {
     stmt.run(sessionId);
   }
 
+  async loadRecurringTokens(): Promise<RecurringToken[]> {
+    const stmt = this.db.prepare("SELECT data FROM recurring_tokens;");
+    const rows = stmt.all() as Array<{ data: string }>;
+    return rows.map((r) => JSON.parse(r.data));
+  }
+
+  async saveRecurringToken(token: RecurringToken): Promise<void> {
+    const stmt = this.db.prepare(`
+      INSERT INTO recurring_tokens (customer_id, token_id, method, created_at, data)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(customer_id) DO UPDATE SET
+        token_id = excluded.token_id,
+        method = excluded.method,
+        data = excluded.data;
+    `);
+    stmt.run(
+      token.customer_id,
+      token.token_id,
+      token.method,
+      token.created_at,
+      JSON.stringify(token)
+    );
+  }
+
+  async deleteRecurringToken(customerId: string): Promise<void> {
+    const stmt = this.db.prepare("DELETE FROM recurring_tokens WHERE customer_id = ?;");
+    stmt.run(customerId);
+  }
+
   loadTransactionsSync(): Transaction[] {
     const stmt = this.db.prepare("SELECT data FROM transactions ORDER BY created_at ASC;");
     const rows = stmt.all() as Array<{ data: string }>;
@@ -318,6 +360,12 @@ export class SqliteStore implements PersistenceStore {
   loadSessionsSync(): UserSession[] {
     const stmt = this.db.prepare("SELECT data FROM user_sessions WHERE session_expires_at > ?;");
     const rows = stmt.all(Date.now()) as Array<{ data: string }>;
+    return rows.map((r) => JSON.parse(r.data));
+  }
+
+  loadRecurringTokensSync(): RecurringToken[] {
+    const stmt = this.db.prepare("SELECT data FROM recurring_tokens;");
+    const rows = stmt.all() as Array<{ data: string }>;
     return rows.map((r) => JSON.parse(r.data));
   }
 

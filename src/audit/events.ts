@@ -577,3 +577,87 @@ export function agentFlaggedEvent(
   };
 }
 
+export function recurringTokenCapturedEvent(
+  transactionId: string,
+  data: {
+    customer_id: string;
+    token_id: string;
+    method: string;
+    max_amount?: number;
+  }
+): EventPayload {
+  return {
+    event_type: AuditEventType.RECURRING_TOKEN_CAPTURED,
+    timestamp: new Date().toISOString(),
+    transaction_id: transactionId,
+    actor: {
+      type: "mcp",
+      component: "recurring_token_capture",
+    },
+    response: data,
+  };
+}
+
+export function recurringPaymentChargedEvent(
+  transactionId: string,
+  data: {
+    payment_id: string;
+    token_id: string;
+    customer_id: string;
+    amount: number;
+    currency: string;
+  }
+): EventPayload {
+  return {
+    event_type: AuditEventType.RECURRING_PAYMENT_CHARGED,
+    timestamp: new Date().toISOString(),
+    transaction_id: transactionId,
+    actor: {
+      type: "mcp",
+      component: "autonomous_payment",
+    },
+    response: data,
+  };
+}
+
+export function recurringPaymentFailedEvent(
+  transactionId: string,
+  data: {
+    token_id: string;
+    customer_id: string;
+    error: string;
+  }
+): EventPayload {
+  return {
+    event_type: AuditEventType.RECURRING_PAYMENT_FAILED,
+    timestamp: new Date().toISOString(),
+    transaction_id: transactionId,
+    actor: {
+      type: "mcp",
+      component: "autonomous_payment",
+    },
+    response: data,
+  };
+}
+
+export function consentRejectedEvent(
+  transactionId: string,
+  data: {
+    challenge_id: string;
+    rejected_at: string;
+    reason?: string;
+  }
+): EventPayload {
+  return {
+    event_type: AuditEventType.CONSENT_REJECTED,
+    timestamp: new Date().toISOString(),
+    transaction_id: transactionId,
+    actor: {
+      type: "buyer_agent",
+      component: "consent_challenge",
+    },
+    response: data,
+  };
+}
+
+

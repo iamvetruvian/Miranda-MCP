@@ -12,6 +12,13 @@ export interface CreateOrderParams {
   amount: Money;
   receipt: string; // The transaction_id for financial reconciliation
   notes?: Record<string, string>;
+  customer_id?: string;
+  notification?: {
+    token_id: string;
+    payment_after?: number;
+  };
+  enable_recurring_mandate?: boolean;
+  mandate_max_amount?: number;
   manifestPaymentConfig?: PaymentConfig;
 }
 
@@ -34,6 +41,7 @@ export interface CreatePaymentLinkParams {
     contact?: string;
   };
   manifestPaymentConfig?: PaymentConfig;
+  restrict_to_mandate_methods?: boolean;
 }
 
 export interface CreatePaymentLinkResult {
@@ -71,6 +79,29 @@ export interface RefundResult {
   status: "initiated" | "processed" | "failed";
 }
 
+export interface RecurringChargeParams {
+  customer_id: string;
+  token_id: string;
+  amount: Money;
+  order_id: string;
+  email: string;
+  contact: string;
+  description?: string;
+}
+
+export interface RecurringChargeResult {
+  payment_id: string;
+  status: "authorized" | "captured" | "failed";
+  amount: Money;
+}
+
+export interface CustomerTokenInfo {
+  token_id: string;
+  method: "upi" | "card" | string;
+  max_amount?: number;
+  created_at?: string;
+}
+
 function extractRazorpayError(err: unknown): string {
   if (!err) return "Unknown error";
   if (typeof err === "string") return err;
@@ -89,15 +120,21 @@ export class RazorpayAdapter {
   private client?: Razorpay;
   private isSimulated: boolean;
   public readonly keyId: string;
+  private keySecret?: string;
 
   // In-memory store for simulated payments
   private simulatedOrders: Map<string, CreateOrderResult> = new Map();
   private simulatedLinks: Map<string, CreatePaymentLinkResult> = new Map();
   private simulatedPayments: Map<string, PaymentStatusResult> = new Map();
   private simulatedRefunds: Map<string, RefundResult> = new Map();
+  private simulatedCustomers: Map<string, { customer_id: string; email: string; contact: string; name?: string }> = new Map();
+  private simulatedCustomerTokens: Map<string, CustomerTokenInfo[]> = new Map();
+  private simulateRecurringFailure: boolean = false;
+  private simulateRecurringFailureReason: string = "Bank mandate expired or revoked by customer";
 
   constructor(keyId?: string, keySecret?: string, forceSimulation?: boolean) {
     this.keyId = keyId ?? "mock_key";
+    this.keySecret = keySecret;
 
     // Use simulation mode if keys are mock/missing or explicitly forced
     const isMockKey = !keyId || keyId.startsWith("mock") || keyId === "mock_key";
@@ -115,6 +152,28 @@ export class RazorpayAdapter {
       }
     } else {
       this.isSimulated = true;
+    }
+  }
+
+  isKeyTestMode(): boolean {
+    return this.keyId.startsWith("rzp_test_") || this.isSimulated;
+  }
+
+  isSimulatedMode(): boolean {
+    return this.isSimulated;
+  }
+
+  getClient(): Razorpay | undefined {
+    return this.client;
+  }
+
+  /**
+   * Configure simulated recurring payment failure for testing and demo flows.
+   */
+  setSimulateRecurringFailure(shouldFail: boolean, reason?: string): void {
+    this.simulateRecurringFailure = shouldFail;
+    if (reason) {
+      this.simulateRecurringFailureReason = reason;
     }
   }
 
@@ -146,6 +205,22 @@ export class RazorpayAdapter {
         receipt: params.receipt,
         notes: params.notes,
       };
+
+      if (params.customer_id) {
+        orderOptions.customer_id = params.customer_id;
+      }
+
+      if (params.notification) {
+        orderOptions.notification = params.notification;
+      }
+
+      if (params.enable_recurring_mandate) {
+        orderOptions.token = {
+          max_amount: params.mandate_max_amount ?? 10000000,
+          frequency: "as_presented",
+          expire_at: Math.floor(Date.now() / 1000) + 31536000,
+        };
+      }
 
       // Manual vs Auto capture
       if (paymentConfig?.capture?.mode === "manual_capture") {
@@ -221,7 +296,21 @@ export class RazorpayAdapter {
         };
       }
 
-      if (paymentConfig?.allowed_methods?.methods && paymentConfig.allowed_methods.methods.length > 0) {
+      if (params.restrict_to_mandate_methods) {
+        options.options = {
+          checkout: {
+            method: {
+              card: true,
+              upi: true,
+              netbanking: false,
+              wallet: false,
+              emi: false,
+              bank_transfer: false,
+              paylater: false,
+            },
+          },
+        };
+      } else if (paymentConfig?.allowed_methods?.methods && paymentConfig.allowed_methods.methods.length > 0) {
         const methods: Record<string, boolean> = {};
         for (const m of paymentConfig.allowed_methods.methods) {
           methods[m] = true;
@@ -255,7 +344,8 @@ export class RazorpayAdapter {
             currency: params.amount.currency,
             receipt: params.reference_id,
           })).id;
-          const checkoutUrl = `http://localhost:3002/pay?order_id=${rzpOrderId}&amount=${params.amount.amount}&currency=${params.amount.currency}&desc=${encodeURIComponent(params.description)}&txn_id=${params.reference_id}`;
+          const callbackPort = Number(process.env.AUTH_CALLBACK_PORT || 3002);
+          const checkoutUrl = `http://localhost:${callbackPort}/pay?order_id=${rzpOrderId}&amount=${params.amount.amount}&currency=${params.amount.currency}&desc=${encodeURIComponent(params.description)}&txn_id=${params.reference_id}`;
           return {
             payment_link_id: rzpOrderId,
             short_url: checkoutUrl,
@@ -342,6 +432,11 @@ export class RazorpayAdapter {
    */
   async checkOrderPayment(orderId: string): Promise<PaymentStatusResult | null> {
     if (this.isSimulated || !this.client) {
+      for (const payment of this.simulatedPayments.values()) {
+        if (payment.order_id === orderId) {
+          return payment;
+        }
+      }
       return null;
     }
 
@@ -373,6 +468,11 @@ export class RazorpayAdapter {
    */
   async checkPaymentLink(linkId: string): Promise<PaymentStatusResult | null> {
     if (this.isSimulated || !this.client) {
+      for (const payment of this.simulatedPayments.values()) {
+        if (payment.order_id === linkId || payment.payment_id.includes(linkId)) {
+          return payment;
+        }
+      }
       return null;
     }
 
@@ -473,6 +573,207 @@ export class RazorpayAdapter {
   }
 
   /**
+   * Create a Razorpay customer entity for recurring token association.
+   */
+  async createCustomer(params: {
+    name?: string;
+    email: string;
+    contact: string;
+  }): Promise<{ customer_id: string }> {
+    if (this.isSimulated || !this.client) {
+      const customerId = `cust_sim_${crypto.randomUUID().slice(0, 14)}`;
+      const record = {
+        customer_id: customerId,
+        email: params.email,
+        contact: params.contact,
+        name: params.name,
+      };
+      this.simulatedCustomers.set(customerId, record);
+      this.simulatedCustomerTokens.set(customerId, [
+        {
+          token_id: `token_sim_${customerId.slice(9)}`,
+          method: "upi",
+          max_amount: 10000000,
+        },
+      ]);
+      return { customer_id: customerId };
+    }
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const customer = (await (this.client.customers as any).create({
+        name: params.name,
+        email: params.email,
+        contact: params.contact,
+      })) as any;
+
+      return { customer_id: String(customer.id) };
+    } catch (err: unknown) {
+      const errMsg = extractRazorpayError(err);
+      if (this.isSimulated) {
+        const customerId = `cust_sim_${crypto.randomUUID().slice(0, 14)}`;
+        return { customer_id: customerId };
+      }
+      throw new Error(`Razorpay createCustomer failed: ${errMsg}`);
+    }
+  }
+
+  /**
+   * Charge a stored Razorpay recurring token autonomously (Server-to-Server).
+   */
+  async chargeRecurringToken(params: RecurringChargeParams): Promise<RecurringChargeResult> {
+    const envFailure = process.env.SIMULATE_RECURRING_PAYMENT_FAILURE;
+    if (
+      this.simulateRecurringFailure ||
+      envFailure === "true" ||
+      (typeof envFailure === "string" && envFailure.length > 0 && envFailure !== "false")
+    ) {
+      const reason = this.simulateRecurringFailure
+        ? this.simulateRecurringFailureReason
+        : (envFailure === "true" ? "Bank mandate expired or revoked by customer" : envFailure);
+      throw new Error(`Razorpay chargeRecurringToken failed: ${reason}`);
+    }
+
+    if (this.isSimulated || !this.client) {
+      const paymentId = `pay_rec_sim_${crypto.randomUUID().slice(0, 14)}`;
+      const result: RecurringChargeResult = {
+        payment_id: paymentId,
+        status: "captured",
+        amount: params.amount,
+      };
+      this.simulatedPayments.set(paymentId, {
+        payment_id: paymentId,
+        order_id: params.order_id,
+        status: "captured",
+        amount: params.amount,
+      });
+      return result;
+    }
+
+    try {
+      const payload = {
+        email: params.email,
+        contact: params.contact,
+        amount: params.amount.amount, // in paise
+        currency: params.amount.currency,
+        order_id: params.order_id,
+        customer_id: params.customer_id,
+        token: params.token_id,
+        recurring: true,
+        description: params.description || "Recurring payment via AI agent",
+      };
+
+      const authHeader = Buffer.from(`${this.keyId}:${this.keySecret || ""}`).toString("base64");
+      const res = await fetch("https://api.razorpay.com/v1/payments/create/recurring", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Basic ${authHeader}`,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        const errMsg = extractRazorpayError(errJson);
+        throw new Error(`Razorpay recurring payment charge failed (${res.status}): ${errMsg}`);
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const paymentData = (await res.json()) as any;
+      const status: "authorized" | "captured" | "failed" =
+        paymentData.status === "captured"
+          ? "captured"
+          : paymentData.status === "authorized"
+          ? "authorized"
+          : "failed";
+
+      const paymentId = String(paymentData.razorpay_payment_id || paymentData.id);
+
+      // Track in simulated/captured payments map for status queries & refunds
+      this.simulatedPayments.set(paymentId, {
+        payment_id: paymentId,
+        order_id: params.order_id,
+        status,
+        amount: {
+          amount: Number(paymentData.amount || params.amount.amount),
+          currency: String(paymentData.currency || params.amount.currency),
+        },
+      });
+
+      return {
+        payment_id: paymentId,
+        status,
+        amount: {
+          amount: Number(paymentData.amount || params.amount.amount),
+          currency: String(paymentData.currency || params.amount.currency),
+        },
+      };
+    } catch (err: unknown) {
+      const errMsg = extractRazorpayError(err);
+      throw new Error(`Razorpay chargeRecurringToken failed: ${errMsg}`);
+    }
+  }
+
+  /**
+   * Fetch saved recurring payment tokens for a given customer ID.
+   */
+  async fetchTokensForCustomer(customerId: string): Promise<CustomerTokenInfo[]> {
+    if (this.isSimulated || !this.client) {
+      const tokens = this.simulatedCustomerTokens.get(customerId);
+      if (tokens && tokens.length > 0) {
+        return tokens;
+      }
+      return [
+        {
+          token_id: `token_sim_${customerId.slice(9)}`,
+          method: "upi",
+          max_amount: 10000000,
+        },
+      ];
+    }
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const tokensRes = (await (this.client.customers as any).fetchTokens(customerId)) as any;
+      const items = tokensRes?.items || [];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return items.map((item: any) => ({
+        token_id: String(item.id),
+        method: String(item.method || "upi"),
+        max_amount: item.max_amount ? Number(item.max_amount) : undefined,
+        created_at: item.created_at ? new Date(item.created_at * 1000).toISOString() : undefined,
+      }));
+    } catch (err: unknown) {
+      const errMsg = extractRazorpayError(err);
+      if (this.isSimulated) {
+        return [
+          {
+            token_id: `token_sim_${customerId.slice(9)}`,
+            method: "upi",
+            max_amount: 10000000,
+          },
+        ];
+      }
+      throw new Error(`Razorpay fetchTokensForCustomer failed: ${errMsg}`);
+    }
+  }
+
+  /**
+   * Fetch token_id from a specific authorized payment.
+   */
+  async fetchTokenForPayment(paymentId: string): Promise<string | undefined> {
+    if (this.isSimulated || !this.client) return undefined;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const payment = (await this.client.payments.fetch(paymentId)) as any;
+      return payment?.token_id ? String(payment.token_id) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Helper for tests & demo: simulate a successful payment completion on a link or order.
    */
   simulatePaymentSuccess(paymentId: string, amount: Money, orderId?: string): PaymentStatusResult {
@@ -484,5 +785,14 @@ export class RazorpayAdapter {
     };
     this.simulatedPayments.set(paymentId, record);
     return record;
+  }
+
+  /**
+   * Helper for tests & demo: inject a simulated customer token.
+   */
+  simulateCustomerToken(customerId: string, token: CustomerTokenInfo): void {
+    const existing = this.simulatedCustomerTokens.get(customerId) || [];
+    existing.push(token);
+    this.simulatedCustomerTokens.set(customerId, existing);
   }
 }

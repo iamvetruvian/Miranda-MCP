@@ -300,6 +300,8 @@ export class OAuth2Handler {
   private extractUserInfo(data: unknown): UserInfo {
     let userId: string | undefined = undefined;
     let userName: string | undefined = undefined;
+    let userEmail: string | undefined = undefined;
+    let userContact: string | undefined = undefined;
 
     if (this.config.user_id_path) {
       const val = this.mapper.resolvePath(data, this.config.user_id_path);
@@ -322,12 +324,38 @@ export class OAuth2Handler {
       userName =
         (data as any)?.user_name ??
         (data as any)?.name ??
-        (data as any)?.user?.name ??
-        (data as any)?.email ??
-        (data as any)?.user?.email;
+        (data as any)?.user?.name;
       if (userName) userName = String(userName);
     }
 
-    return { user_id: userId, user_name: userName };
+    const rawEmail =
+      (data as any)?.email ??
+      (data as any)?.user?.email ??
+      (data as any)?.user_email;
+    if (rawEmail) {
+      userEmail = String(rawEmail);
+    } else if (userName && userName.includes("@")) {
+      userEmail = userName;
+    } else if (userId && userId.includes("@")) {
+      userEmail = userId;
+    }
+
+    const rawContact =
+      (data as any)?.contact ??
+      (data as any)?.phone ??
+      (data as any)?.user?.contact ??
+      (data as any)?.user?.phone ??
+      (data as any)?.phone_number ??
+      (data as any)?.user_contact;
+    if (rawContact) {
+      userContact = String(rawContact);
+    }
+
+    return {
+      user_id: userId,
+      user_name: userName,
+      user_email: userEmail,
+      user_contact: userContact,
+    };
   }
 }

@@ -20,6 +20,7 @@ export interface IntentMandate {
   principal: {
     user_ref: string; // opaque user reference
   };
+  user_consent_token?: string;
   constraints: IntentMandateConstraints;
   nonce: string;
   issued_at: string;
