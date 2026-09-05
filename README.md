@@ -1,51 +1,7 @@
-# MerchantMCP — Drop-In Agentic Commerce MCP Gateway
+# Miranda MCP — Drop-In Agentic Commerce MCP Gateway
 
 > **Make any merchant transactable by AI buyer agents end-to-end with zero code changes.**  
 > Every money action is **explainable, bounded, and gated** with a tamper-evident, SHA-256 hash-chained audit trail and periodic cryptographic checkpoints.
-
----
-
-## Architecture Overview
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    BUYER AGENT                          │
-└───────────────────────────┬─────────────────────────────┘
-                            │ Model Context Protocol (MCP)
-                            ▼
-┌─────────────────────────────────────────────────────────┐
-│                   MERCHANT MCP SERVER                   │
-│                                                         │
-│   ┌───────────────────┐        ┌───────────────────┐    │
-│   │  Discovery Tools  │        │ Transaction Tools │    │
-│   │ (Search/Refine)   │        │ (Purchase/Refund) │    │
-│   └─────────┬─────────┘        └─────────┬─────────┘    │
-│             │                            │              │
-│             ▼                            ▼              │
-│   ┌───────────────────┐        ┌───────────────────┐    │
-│   │ Connector Runtime │        │   Policy Engine   │    │
-│   │ (Manifest Engine) │        │ (Bounded & Gated) │    │
-│   └─────────┬─────────┘        └─────────┬─────────┘    │
-│             │                            │              │
-│             │                            ▼              │
-│             │                  ┌───────────────────┐    │
-│             │                  │  Payment Adapter  │    │
-│             │                  │ (Razorpay Rails)  │    │
-│             │                  └─────────┬─────────┘    │
-│             │                            │              │
-│             ▼                            ▼              │
-│   ┌────────────────────────────────────────────────┐    │
-│   │   Append-Only Audit Ledger (SHA-256 Chain +    │    │
-│   │            HMAC Signed Checkpoints)            │    │
-│   └────────────────────────────────────────────────┘    │
-└─────────────┬────────────────────────────┬──────────────┘
-              │ Localhost / Private VPC    │
-              ▼                            ▼
-   ┌──────────────────────┐     ┌──────────────────────┐
-   │ Merchant Commerce    │     │ Razorpay Gateway /   │
-   │ APIs (Catalog/Order) │     │ Ingestion Webhook    │
-   └──────────────────────┘     └──────────────────────┘
-```
 
 ---
 
@@ -90,19 +46,31 @@
 
 ---
 
-## Complete MCP Tools Catalog (10 Tools)
+## Complete MCP Tools Catalog (22 Tools)
 
 | Tool | Category | Description |
 |---|---|---|
 | `search_products` | Discovery | Keyword & domain-parameter search with multi-filter refinements, pagination, and stateful `search_id`. |
 | `get_product` | Discovery | Canonical product/showtime detail lookup by ID / SKU with ephemeral hold expiry. |
+| `browse_categories` | Discovery | Browse the merchant's category hierarchy for category-driven navigation. |
+| `autocomplete` | Discovery | Real-time typeahead search suggestions as the user types queries. |
+| `check_availability` | Discovery | Live stock availability check across products, variants, date slots, or seat maps. |
 | `get_merchant_info` | Discovery | Returns merchant profile, capability matrix, integration level, currency, and discovery schema. |
 | `refine_search` | Discovery | Iteratively narrows search results using discovered dynamic facets while maintaining search session state. |
 | `get_refinement_options` | Discovery | Paginates and filters large facet option lists (e.g. searching 50+ brands) with substring search. |
-| `prepare_purchase` | Transaction | Resolves stock/hold, creates merchant checkout, evaluates policy gates, generates Razorpay order & payment link. |
+| `check_auth_status` | Authentication | Check user authentication state, active sessions, user profile details, and vaulted payment instruments. |
+| `request_login` | Authentication | Initiate merchant OAuth2 authorization flow; returns an authorization URL for user browser login. |
+| `logout` | Authentication | Invalidate and terminate the active user session on the merchant. |
+| `create_mandate` | Authorization | Create an AP2 Intent Mandate for advance budgetary spending limits, domain restrictions, and policy constraints. |
+| `add_to_cart` | Cart | Add an item or variant to a multi-item shopping cart (creates cart if omitted). |
+| `get_cart` | Cart | Retrieve current contents, quantities, and calculated total of an active shopping cart. |
+| `apply_coupon` | Cart | Apply promotional coupon codes or discount vouchers to an active checkout session. |
+| `get_delivery_options` | Delivery | Retrieve available delivery and shipping options/rates for an active checkout. |
+| `select_delivery_option` | Delivery | Choose a shipping or delivery option for an active checkout session. |
+| `prepare_purchase` | Transaction | Resolves stock/hold, creates merchant checkout, evaluates policy gates, and initiates payment (autopay token or payment links). |
 | `get_transaction_status` | Transaction | Polls real-time transaction state and automatically finalizes merchant order confirmation upon payment authorization. |
 | `cancel_transaction` | Transaction | Cancels a transaction. Pre-payment: releases hold. Post-confirmation: executes refund and merchant cancellation. |
-| `request_refund` | Transaction | Policy-gated money action for partial or full refunds of captured payments on Razorpay rails. |
+| `request_refund` | Transaction | Policy-gated money action for partial or full refunds of captured payments. |
 | `get_transaction_audit` | Audit | Returns the full audit timeline, verifies cryptographic hash chain integrity, and renders the Decision Receipt. |
 
 ---
@@ -120,17 +88,136 @@ npm run build
 npm test
 ```
 
-### 3. Run Live End-to-End Interactive Demo
+### 3. Demo Ecommerce Platforms & AI Agent Setup
+
+For testing and demonstration, two full-featured open-source ecommerce platforms are included in the `demo/merchants/` folder:
+- **ProShop v2**: Adapted from [bradtraversy/proshop-v2](https://github.com/bradtraversy/proshop-v2) — an ecommerce platform built with the MERN stack. *(These are great projects, please star them! ⭐)*
+- **Skateshop**: Adapted from [sadmann7/skateshop](https://github.com/sadmann7/skateshop) — an ecommerce skateshop built with Next.js 14, Stripe Connect, Clerk Auth, and Drizzle ORM. *(These are great projects, please star them! ⭐)*
+
+The corresponding integration manifests for each store are available directly at the root of this project:
+- `manifest.json` &rarr; ProShop integration manifest (runs on `http://localhost:5000`)
+- `skateshop-manifest.json` &rarr; Skateshop integration manifest (runs on `http://localhost:3000`)
+
+#### Setting Up the Demo Stores
+
+##### Option A: ProShop v2 (`demo/merchants/proshop-v2`)
 ```bash
-npm run demo
+cd demo/merchants/proshop-v2
+
+# Configure environment variables
+cp .env.example .env
+# Update .env with your MONGO_URI, JWT_SECRET, etc.
+
+# Install dependencies (root and frontend)
+npm install
+npm install --prefix frontend
+
+# (Optional) Seed the database with sample products and users
+npm run data:import
+
+# Start backend server (runs on http://localhost:5000)
+npm run server
+# Or start both frontend (:3000) and backend (:5000) concurrently:
+# npm run dev
 ```
 
-The demo launches three mock merchant backends simultaneously (`TechBazaar Electronics` on `:4001`, `PageTurner Books` on `:4002`, and `TicketVerse Cinemas` on `:4003`) and demonstrates:
-- **Scenario 1 (Happy Path - TechBazaar)**: Autonomous discovery, dynamic brand/price refinement, purchase, payment link generation, webhook authorization, order confirmation, and Decision Receipt for a Lenovo laptop under ₹70,000.
-- **Scenario 2 (Happy Path - PageTurner Books)**: Autonomous discovery and purchase of *The Pragmatic Programmer* on a GET-based REST API bookstore.
-- **Scenario 3 (Graceful Failure Handling)**: Attempting to buy an out-of-stock item (Nvidia RTX 4090) with complete rejection audit trail.
-- **Scenario 4 (Non-Retail Cinema Ticketing & Refund)**: Parameterized showtime discovery (Mumbai, 2026-09-01), seat hold reservation, booking confirmation with PNR, and full policy-gated post-confirmation refund on Razorpay rails.
-- **Scenario 5 (Refinement Option Pagination)**: Paginating brand facet options matching `"sam"` via `get_refinement_options`.
+##### Option B: Skateshop (`demo/merchants/skateshop`)
+```bash
+cd demo/merchants/skateshop
+
+# Configure environment variables
+cp .env.example .env
+# Update .env with your database credentials, Clerk keys, and Stripe keys
+
+# Install dependencies with pnpm
+pnpm install
+
+# Push database schema
+pnpm run db:push
+
+# Start development server (runs on http://localhost:3000)
+pnpm run dev
+```
+
+#### Configuring Your AI Agent
+
+Add the corresponding configuration to your choice of AI agent (e.g. Claude Desktop, Cursor, Windsurf, Claude Code, or any MCP-compatible agent).
+
+> **Note:** Replace `/path/to/Miranda` with the canonical absolute path to your cloned Miranda MCP repository on your machine (e.g. `/home/username/Miranda`). Ensure you have built the project (`npm run build`) beforehand to generate `dist/server.js`, and that the `data/` directory exists (`mkdir -p data`).
+
+##### Skateshop MCP Configuration
+```json
+{
+  "skateshop": {
+    "type": "stdio",
+    "command": "node",
+    "args": [
+      "/path/to/Miranda/dist/server.js",
+      "/path/to/Miranda/skateshop-manifest.json"
+    ],
+    "env": {
+      "WEBHOOK_PORT": "3101",
+      "MERCHANTMCP_DB_PATH": "/path/to/Miranda/data/skateshop.db",
+      "AUDIT_LOG_FILE": "/path/to/Miranda/data/skateshop-audit.jsonl",
+      "DISABLE_WEBHOOK_SERVER": "true"
+    }
+  }
+}
+```
+
+##### ProShop MCP Configuration
+```json
+{
+  "proshop": {
+    "type": "stdio",
+    "command": "node",
+    "args": [
+      "/path/to/Miranda/dist/server.js",
+      "/path/to/Miranda/manifest.json"
+    ],
+    "env": {
+      "WEBHOOK_PORT": "3001",
+      "MERCHANTMCP_DB_PATH": "/path/to/Miranda/data/proshop.db",
+      "AUDIT_LOG_FILE": "/path/to/Miranda/data/proshop-audit.jsonl",
+      "DISABLE_WEBHOOK_SERVER": "true"
+    }
+  }
+}
+```
+
+##### Combined MCP Configuration (e.g. `claude_desktop_config.json` / `mcp_config.json`)
+```json
+{
+  "mcpServers": {
+    "skateshop": {
+      "command": "node",
+      "args": [
+        "/path/to/Miranda/dist/server.js",
+        "/path/to/Miranda/skateshop-manifest.json"
+      ],
+      "env": {
+        "WEBHOOK_PORT": "3101",
+        "MERCHANTMCP_DB_PATH": "/path/to/Miranda/data/skateshop.db",
+        "AUDIT_LOG_FILE": "/path/to/Miranda/data/skateshop-audit.jsonl",
+        "DISABLE_WEBHOOK_SERVER": "true"
+      }
+    },
+    "proshop": {
+      "command": "node",
+      "args": [
+        "/path/to/Miranda/dist/server.js",
+        "/path/to/Miranda/manifest.json"
+      ],
+      "env": {
+        "WEBHOOK_PORT": "3001",
+        "MERCHANTMCP_DB_PATH": "/path/to/Miranda/data/proshop.db",
+        "AUDIT_LOG_FILE": "/path/to/Miranda/data/proshop-audit.jsonl",
+        "DISABLE_WEBHOOK_SERVER": "true"
+      }
+    }
+  }
+}
+```
 
 ---
 
@@ -182,7 +269,7 @@ The demo launches three mock merchant backends simultaneously (`TechBazaar Elect
 ## Project Structure
 
 ```
-MerchantMCP/
+Miranda MCP/
 ├── src/
 │   ├── server.ts                    # Main MCP server factory, SSE transport & fail-fast validation
 │   ├── types/

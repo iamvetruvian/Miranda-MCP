@@ -319,6 +319,19 @@ export function registerTransactionTools(
       if (activeSession) {
         (txn as any).session_id = activeSession.session_id;
       }
+
+      const effectiveShippingAddress = (resolvedCustomerData.shippingAddress as Record<string, unknown>)
+        || (resolvedCustomerData.shipping_address as Record<string, unknown>)
+        || (activeSession?.shipping_address as Record<string, unknown>)
+        || (resolvedCustomerData.address ? {
+            line1: resolvedCustomerData.address,
+            city: resolvedCustomerData.city,
+            postal_code: resolvedCustomerData.postalCode || resolvedCustomerData.postal_code,
+            country: resolvedCustomerData.country,
+          } : undefined);
+      if (effectiveShippingAddress) {
+        txn.shipping_address = effectiveShippingAddress;
+      }
       const txnId = txn.transaction_id;
 
       auditLedger.append(
@@ -741,7 +754,13 @@ export function registerTransactionTools(
                         order_id: order.order_id,
                         status: order.status,
                         confirmed_at: order.confirmed_at,
+                        ...(txn.shipping_address || (order as any).shipping_address
+                          ? { shipping_address: (order as any).shipping_address ?? txn.shipping_address }
+                          : {}),
                       },
+                      ...(txn.shipping_address || (order as any).shipping_address
+                        ? { shipping_address: (order as any).shipping_address ?? txn.shipping_address }
+                        : {}),
                       policy: policyDecision,
                       ucp: projectUcpEnvelope(txnManager.get(txnId)),
                     },
@@ -1398,6 +1417,20 @@ export function registerTransactionTools(
 
       const updatedTxn = txnManager.get(txnId);
 
+      // Resolve shipping address from session if not already attached to txn
+      if (!updatedTxn.shipping_address) {
+        const sessionStore = authGuard?.getSessionStore?.();
+        const activeSession = sessionStore?.getActiveSession();
+        if (activeSession?.shipping_address && typeof activeSession.shipping_address === "object") {
+          updatedTxn.shipping_address = activeSession.shipping_address as Record<string, unknown>;
+        }
+      }
+
+      const resolvedShippingAddress = updatedTxn.shipping_address ?? (updatedTxn.merchant_order as any)?.shipping_address;
+      if (resolvedShippingAddress && updatedTxn.merchant_order && !updatedTxn.merchant_order.shipping_address) {
+        updatedTxn.merchant_order.shipping_address = resolvedShippingAddress;
+      }
+
       return {
         ...(updatedTxn.state === TransactionState.FAILED ? { isError: true } : {}),
         content: [
@@ -1458,7 +1491,15 @@ export function registerTransactionTools(
                         message: "Consent has been granted by the user. Payment progression in progress.",
                       }
                       : null,
-                order: updatedTxn.merchant_order ?? null,
+                order: updatedTxn.merchant_order
+                  ? {
+                      ...updatedTxn.merchant_order,
+                      ...(resolvedShippingAddress ? { shipping_address: resolvedShippingAddress } : {}),
+                    }
+                  : null,
+                ...(resolvedShippingAddress && updatedTxn.state === TransactionState.ORDER_CONFIRMED
+                  ? { shipping_address: resolvedShippingAddress }
+                  : {}),
                 ...(updatedTxn.state === TransactionState.FAILED
                   ? {
                     error:

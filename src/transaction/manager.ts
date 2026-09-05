@@ -194,6 +194,9 @@ export class TransactionManager {
     order: MerchantOrderBinding
   ): Transaction {
     const txn = this.get(transactionId);
+    if (txn.shipping_address && !order.shipping_address) {
+      order.shipping_address = txn.shipping_address;
+    }
     txn.merchant_order = order;
     this.persist(txn);
     return txn;

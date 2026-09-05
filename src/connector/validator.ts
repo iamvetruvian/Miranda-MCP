@@ -93,4 +93,5 @@ export const OrderConfirmationSchema = z.object({
   order_id: z.string().min(1, { message: "order_id is required" }),
   status: z.string().min(1, { message: "order status is required" }),
   confirmed_at: z.string().optional(),
+  shipping_address: z.record(z.unknown()).optional(),
 });

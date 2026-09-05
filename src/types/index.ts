@@ -344,6 +344,7 @@ export interface MerchantOrderBinding {
   status: string;
   confirmed_at?: string;
   tracking_reference?: string;
+  shipping_address?: Record<string, unknown>;
 }
 
 export interface Transaction {
@@ -369,6 +370,8 @@ export interface Transaction {
   customer_id?: string;
   /** Flag indicating whether recurring token was captured */
   token_captured?: boolean;
+  /** Resolved customer shipping address from session or checkout */
+  shipping_address?: Record<string, unknown>;
   /** Ordered list of audit event IDs associated with this transaction */
   audit_event_ids: string[];
 }

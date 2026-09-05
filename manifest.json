@@ -1,0 +1,494 @@
+{
+  "merchant": {
+    "name": "ProShop Electronics",
+    "description": "Modern consumer electronics, gadgets, cameras, audio gear, and gaming tech store",
+    "commerce_domain": "retail",
+    "currency": "INR",
+    "base_url": "http://localhost:5000",
+    "supported_currencies": [
+      "INR",
+      "USD"
+    ],
+    "locale": "en-IN"
+  },
+  "auth": {
+    "type": "oauth2_authorization_code",
+    "header": "Authorization",
+    "token_prefix": "Bearer",
+    "oauth2_user": {
+      "authorization_url": "http://localhost:5000/oauth/authorize",
+      "token_url": "http://localhost:5000/oauth/token",
+      "userinfo_url": "http://localhost:5000/oauth/userinfo",
+      "client_id": "proshop_agent_client",
+      "client_secret": "proshop_agent_secret",
+      "redirect_uri": "http://localhost:3002/auth/callback",
+      "scope": [
+        "read_profile",
+        "orders"
+      ],
+      "session_ttl_seconds": 2592000,
+      "shipping_address_path": "$.shippingAddress",
+      "shipping_addresses_path": "$.addresses"
+    },
+    "protected_operations": [
+      "create_checkout",
+      "confirm_order",
+      "cancel_order"
+    ],
+    "public_operations": [
+      "search",
+      "get_product"
+    ]
+  },
+  "http_conventions": {
+    "content_type": "application/json",
+    "accept": "application/json",
+    "default_headers": {
+      "Accept": "application/json"
+    },
+    "retry": {
+      "max_retries": 2,
+      "retryable_status_codes": [
+        429,
+        500,
+        502,
+        503,
+        504
+      ],
+      "initial_backoff_ms": 1000,
+      "max_backoff_ms": 10000
+    },
+    "timeout": {
+      "request_timeout_ms": 15000
+    },
+    "error_message_path": "$.message"
+  },
+  "pagination": {
+    "strategy": "page_number",
+    "page_param": "pageNumber",
+    "page_size_param": "pageSize",
+    "default_page_size": 8,
+    "first_page": 1,
+    "total_count_path": "$.pages"
+  },
+  "error_mapping": {
+    "status_code_map": {
+      "400": {
+        "category": "invalid_input",
+        "retryable": false,
+        "message": "Invalid request data or missing parameters"
+      },
+      "401": {
+        "category": "auth_failed",
+        "retryable": false,
+        "message": "Authentication required or token expired"
+      },
+      "404": {
+        "category": "not_found",
+        "retryable": false,
+        "message": "Product or order resource not found"
+      },
+      "429": {
+        "category": "rate_limited",
+        "retryable": true,
+        "message": "Rate limit exceeded, please retry later"
+      },
+      "500": {
+        "category": "server_error",
+        "retryable": true,
+        "message": "Internal server error"
+      }
+    }
+  },
+  "operations": {
+    "search": {
+      "method": "GET",
+      "path": "/api/products",
+      "request_mapping": {
+        "keyword": {
+          "from": "$.query"
+        },
+        "pageNumber": {
+          "from": "$.page"
+        }
+      },
+      "response_path": "$.products",
+      "total_path": "$.pages"
+    },
+    "get_product": {
+      "method": "GET",
+      "path": "/api/products/:product_id"
+    },
+    "create_checkout": {
+      "method": "POST",
+      "path": "/api/orders",
+      "request_mapping": {
+        "orderItems[0]._id": {
+          "from": "$.product_id"
+        },
+        "orderItems[0].qty": {
+          "from": "$.quantity"
+        },
+        "paymentMethod": {
+          "from": null,
+          "transform": {
+            "type": "default",
+            "value": "Stripe"
+          }
+        },
+        "shippingAddress.address": {
+          "from": "$.customer.address",
+          "transform": {
+            "type": "default",
+            "value": "123 Main St"
+          }
+        },
+        "shippingAddress.city": {
+          "from": "$.customer.city",
+          "transform": {
+            "type": "default",
+            "value": "Mumbai"
+          }
+        },
+        "shippingAddress.postalCode": {
+          "from": "$.customer.postalCode",
+          "transform": {
+            "type": "default",
+            "value": "400001"
+          }
+        },
+        "shippingAddress.country": {
+          "from": "$.customer.country",
+          "transform": {
+            "type": "default",
+            "value": "India"
+          }
+        }
+      }
+    },
+    "get_checkout": {
+      "method": "GET",
+      "path": "/api/orders/:checkout_id"
+    },
+    "confirm_order": {
+      "method": "PUT",
+      "path": "/api/orders/:checkout_id/pay",
+      "request_mapping": {
+        "payment_id": {
+          "from": "$.payment_id"
+        },
+        "id": {
+          "from": "$.payment_id"
+        },
+        "status": {
+          "from": null,
+          "transform": {
+            "type": "default",
+            "value": "COMPLETED"
+          }
+        }
+      }
+    },
+    "get_order_status": {
+      "method": "GET",
+      "path": "/api/orders/:order_id"
+    },
+    "custom": {
+      "get_top_products": {
+        "method": "GET",
+        "path": "/api/products/top",
+        "description": "Fetch top rated products from the catalog"
+      },
+      "create_product_review": {
+        "method": "POST",
+        "path": "/api/products/:product_id/reviews",
+        "description": "Submit a customer rating and review for a product",
+        "request_mapping": {
+          "rating": {
+            "from": "$.rating"
+          },
+          "comment": {
+            "from": "$.comment"
+          }
+        }
+      },
+      "get_my_orders": {
+        "method": "GET",
+        "path": "/api/orders/mine",
+        "description": "Retrieve order history for the authenticated customer"
+      },
+      "create_payment_link": {
+        "method": "POST",
+        "path": "/api/orders/:checkout_id/pay-link",
+        "description": "Generate hosted Stripe payment link directly from merchant backend"
+      },
+      "charge_token": {
+        "method": "POST",
+        "path": "/api/orders/:checkout_id/charge",
+        "description": "Execute S2S token payment charge against merchant backend",
+        "request_mapping": {
+          "token": { "from": "$.token" },
+          "amount": { "from": "$.amount" }
+        }
+      }
+    }
+  },
+  "refinements": {
+    "mode": "derived",
+    "derive_from_attributes": [
+      "brand",
+      "category"
+    ],
+    "static_filters": [
+      {
+        "key": "brand",
+        "label": "Brand",
+        "type": "enum",
+        "options": [
+          {
+            "value": "Apple",
+            "label": "Apple"
+          },
+          {
+            "value": "Canon",
+            "label": "Canon"
+          },
+          {
+            "value": "Sony",
+            "label": "Sony"
+          },
+          {
+            "value": "Logitech",
+            "label": "Logitech"
+          },
+          {
+            "value": "Amazon",
+            "label": "Amazon"
+          }
+        ]
+      },
+      {
+        "key": "category",
+        "label": "Category",
+        "type": "enum",
+        "options": [
+          {
+            "value": "Electronics",
+            "label": "Electronics"
+          }
+        ]
+      }
+    ]
+  },
+  "field_mappings": {
+    "offer": {
+      "offer_id": {
+        "from": "$._id"
+      },
+      "title": {
+        "from": "$.name"
+      },
+      "description": {
+        "from": "$.description"
+      },
+      "price.amount": {
+        "from": "$.price",
+        "transform": {
+          "type": "multiply",
+          "value": 100
+        }
+      },
+      "price.currency": {
+        "from": null,
+        "transform": {
+          "type": "default",
+          "value": "INR"
+        }
+      },
+      "availability": {
+        "from": "$.countInStock",
+        "transform": {
+          "type": "enum",
+          "enum_map": {
+            "0": "out_of_stock",
+            "*": "in_stock"
+          }
+        }
+      },
+      "attributes.brand": {
+        "from": "$.brand"
+      },
+      "attributes.category": {
+        "from": "$.category"
+      },
+      "attributes.rating": {
+        "from": "$.rating"
+      },
+      "attributes.numReviews": {
+        "from": "$.numReviews"
+      },
+      "attributes.countInStock": {
+        "from": "$.countInStock"
+      },
+      "attributes.image": {
+        "from": "$.image"
+      }
+    },
+    "checkout": {
+      "checkout_id": {
+        "from": "$._id"
+      },
+      "payment_url": {
+        "from": "$.paymentUrl"
+      },
+      "sku": {
+        "from": "$.orderItems[0].product"
+      },
+      "total.amount": {
+        "from": "$.totalPrice",
+        "transform": {
+          "type": "multiply",
+          "value": 100
+        }
+      },
+      "total.currency": {
+        "from": null,
+        "transform": {
+          "type": "default",
+          "value": "INR"
+        }
+      },
+      "available": {
+        "from": null,
+        "transform": {
+          "type": "default",
+          "value": true
+        }
+      },
+      "details.itemsPrice": {
+        "from": "$.itemsPrice",
+        "transform": {
+          "type": "multiply",
+          "value": 100
+        }
+      },
+      "details.taxPrice": {
+        "from": "$.taxPrice",
+        "transform": {
+          "type": "multiply",
+          "value": 100
+        }
+      },
+      "details.shippingPrice": {
+        "from": "$.shippingPrice",
+        "transform": {
+          "type": "multiply",
+          "value": 100
+        }
+      }
+    },
+    "order": {
+      "order_id": {
+        "from": "$._id"
+      },
+      "status": {
+        "from": "$.isPaid",
+        "transform": {
+          "type": "enum",
+          "enum_map": {
+            "true": "confirmed",
+            "false": "payment_pending"
+          }
+        }
+      },
+      "confirmed_at": {
+        "from": "$.paidAt"
+      },
+      "fulfillment.isDelivered": {
+        "from": "$.isDelivered"
+      },
+      "fulfillment.deliveredAt": {
+        "from": "$.deliveredAt"
+      }
+    }
+  },
+  "sort_options": {
+    "options": [
+      {
+        "key": "relevance",
+        "label": "Relevance",
+        "merchant_value": ""
+      },
+      {
+        "key": "top_rated",
+        "label": "Top Rated",
+        "merchant_value": "top"
+      }
+    ],
+    "default": "relevance",
+    "sort_param": "sort"
+  },
+  "attribute_catalog": {
+    "attributes": [
+      {
+        "key": "brand",
+        "label": "Brand",
+        "type": "string",
+        "filterable": true
+      },
+      {
+        "key": "category",
+        "label": "Category",
+        "type": "string",
+        "filterable": true
+      },
+      {
+        "key": "rating",
+        "label": "Customer Rating",
+        "type": "number",
+        "sortable": true
+      },
+      {
+        "key": "numReviews",
+        "label": "Total Reviews",
+        "type": "number"
+      },
+      {
+        "key": "countInStock",
+        "label": "Stock Quantity",
+        "type": "number"
+      }
+    ]
+  },
+  "payment": {
+    "provider": "stripe",
+    "stripe_secret_key_env": "STRIPE_SECRET_KEY",
+    "stripe_publishable_key_env": "STRIPE_PUBLISHABLE_KEY",
+    "webhook_secret_env": "STRIPE_WEBHOOK_SECRET",
+    "integration_type": "payment_intents_and_checkout",
+    "capture": {
+      "mode": "auto_capture",
+      "capture_trigger": "on_order_confirm"
+    },
+    "allowed_methods": {
+      "methods": [
+        "card"
+      ]
+    },
+    "payment_link": {
+      "expire_after_seconds": 3600
+    }
+  },
+  "integration": {
+    "type": "rest_manifest",
+    "manifest_version": "2.0.0"
+  },
+  "telemetry": {
+    "provider": "honeycomb",
+    "endpoint": "https://api.honeycomb.io/v1/logs",
+    "service_name": "proshop-mcp",
+    "api_key_env": "HONEYCOMB_API_KEY",
+    "batch_size": 10,
+    "flush_interval_ms": 2000
+  }
+}
