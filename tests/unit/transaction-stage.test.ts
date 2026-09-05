@@ -10,7 +10,7 @@ import { ConnectorRuntime } from "../../src/connector/runtime.js";
 import { registerTransactionTools } from "../../src/tools/transaction.js";
 import { TransactionManager } from "../../src/transaction/manager.js";
 import { PolicyEngine } from "../../src/policy/engine.js";
-import { RazorpayAdapter } from "../../src/payment/razorpay.js";
+import { StripeAdapter } from "../../src/payment/stripe.js";
 import { AuditLedger } from "../../src/audit/ledger.js";
 import { IntegrationManifest } from "../../src/types/manifest.js";
 
@@ -239,7 +239,7 @@ describe("Component 5: Transaction Stage Runtime", () => {
     const connector = new ConnectorRuntime(manifest);
     const txnManager = new TransactionManager();
     const policyEngine = new PolicyEngine();
-    const paymentAdapter = new RazorpayAdapter();
+    const paymentAdapter = new StripeAdapter();
     const auditLedger = new AuditLedger();
 
     const { server, tools } = createMockServer();
@@ -289,7 +289,7 @@ describe("Component 5: Transaction Stage Runtime", () => {
     const connector = new ConnectorRuntime(manifest);
     const txnManager = new TransactionManager();
     const policyEngine = new PolicyEngine();
-    const paymentAdapter = new RazorpayAdapter();
+    const paymentAdapter = new StripeAdapter();
     const auditLedger = new AuditLedger();
 
     const { server, tools } = createMockServer();

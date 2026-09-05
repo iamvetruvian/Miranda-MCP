@@ -4,7 +4,7 @@ import { ConnectorRuntime } from "../../src/connector/runtime.js";
 import { registerTransactionTools } from "../../src/tools/transaction.js";
 import { TransactionManager } from "../../src/transaction/manager.js";
 import { PolicyEngine } from "../../src/policy/engine.js";
-import { RazorpayAdapter } from "../../src/payment/razorpay.js";
+import { StripeAdapter } from "../../src/payment/stripe.js";
 import { AuditLedger } from "../../src/audit/ledger.js";
 import { IntegrationManifest } from "../../src/types/manifest.js";
 import { RecurringTokenStore } from "../../src/payment/token-store.js";
@@ -25,7 +25,7 @@ describe("Phase 3: Token Capture During First Payment", () => {
   let connector: ConnectorRuntime;
   let txnManager: TransactionManager;
   let policyEngine: PolicyEngine;
-  let paymentAdapter: RazorpayAdapter;
+  let paymentAdapter: StripeAdapter;
   let auditLedger: AuditLedger;
   let tokenStore: RecurringTokenStore;
   let tools: Map<string, { description: string; schema: any; handler: Function }>;
@@ -51,9 +51,8 @@ describe("Phase 3: Token Capture During First Payment", () => {
       order: { order_id: { from: "$.id" }, status: { from: "$.status" } },
     },
     payment: {
-      provider: "razorpay",
-      razorpay_key_id_env: "RAZORPAY_KEY_ID",
-      razorpay_key_secret_env: "RAZORPAY_KEY_SECRET",
+      provider: "stripe",
+      stripe_secret_key_env: "STRIPE_SECRET_KEY",
     },
   };
 
@@ -62,7 +61,7 @@ describe("Phase 3: Token Capture During First Payment", () => {
     auditLedger = new AuditLedger();
     txnManager = new TransactionManager(auditLedger);
     policyEngine = new PolicyEngine();
-    paymentAdapter = new RazorpayAdapter("mock_key", "mock_secret", true);
+    paymentAdapter = new StripeAdapter("mock_key", undefined, true);
     tokenStore = new RecurringTokenStore();
 
     // Mock product lookup and checkout creation
@@ -121,10 +120,10 @@ describe("Phase 3: Token Capture During First Payment", () => {
     const payload = JSON.parse(res.content[0].text);
     expect(payload.state).toBe(TransactionState.PAYMENT_PENDING);
     expect(payload.payment.status).toBe("user_action_required");
-    expect(payload.payment.payment_url).toContain("https://rzp.io/i/sim_");
+    expect(payload.payment.payment_url).toContain("http://localhost:");
 
     const txn = txnManager.get(payload.transaction_id);
-    expect(txn.customer_id).toMatch(/^cust_sim_/);
+    expect(txn.customer_id).toMatch(/^(cus|cust)_sim_/);
     expect(txn.payment?.customer_id).toBe(txn.customer_id);
     expect(txn.payment?.customer_email).toBe("first_buyer@example.com");
     expect(txn.payment?.customer_contact).toBe("+919876543210");
@@ -153,7 +152,7 @@ describe("Phase 3: Token Capture During First Payment", () => {
     paymentAdapter.simulatePaymentSuccess(
       paymentId,
       { amount: 1500000, currency: "INR" },
-      txn.payment?.razorpay_order_id
+      txn.payment?.stripe_checkout_session_id
     );
 
     // 3. Agent polls transaction status
@@ -171,7 +170,7 @@ describe("Phase 3: Token Capture During First Payment", () => {
     expect(tokenStore.has(customerId)).toBe(true);
     const savedToken = tokenStore.get(customerId);
     expect(savedToken?.token_id).toBe(statusPayload.recurring_token);
-    expect(savedToken?.method).toBe("upi");
+    expect(savedToken?.method).toBe("card");
 
     // 5. Verify RECURRING_TOKEN_CAPTURED event in audit trail
     const auditEvents = auditLedger.getTransactionAudit(txnId);

@@ -20,6 +20,7 @@ import { truncateRefinementOptions } from "../connector/refinements.js";
 import { deriveCapabilityMatrix, classifyIntegrationLevel } from "../connector/capabilities.js";
 import { ResponseMapper } from "../connector/mapper.js";
 import { AuthGuard } from "../auth/auth-guard.js";
+import { reasoningSchema, withReasoning } from "./reasoning.js";
 
 export function registerDiscoveryTools(
   server: McpServer,
@@ -51,6 +52,7 @@ export function registerDiscoveryTools(
       page: z.number().optional().default(1).describe("Page number (1-indexed)"),
       sort: z.string().optional().describe("Sort option key (e.g. 'price_asc', 'price_desc', 'relevance')"),
       session_id: z.string().optional().describe("Optional active session ID for authenticated search"),
+      reasoning: reasoningSchema,
     },
     async (params) => {
       pruneSearchStates();
@@ -136,11 +138,18 @@ export function registerDiscoveryTools(
         );
 
         auditLedger.append(
-          toolCompletedEvent(searchTrackId, "search_products", {
-            search_id: searchResult.search_id,
-            result_count: searchResult.total_results,
-            refinement_count: searchResult.refinements.length,
-          })
+          toolCompletedEvent(
+            searchTrackId,
+            "search_products",
+            withReasoning(
+              {
+                search_id: searchResult.search_id,
+                result_count: searchResult.total_results,
+                refinement_count: searchResult.refinements.length,
+              },
+              params.reasoning
+            )
+          )
         );
 
         return {
@@ -148,10 +157,13 @@ export function registerDiscoveryTools(
             {
               type: "text",
               text: JSON.stringify(
-                {
-                  ...searchResult,
-                  refinements: truncatedRefinements,
-                },
+                withReasoning(
+                  {
+                    ...searchResult,
+                    refinements: truncatedRefinements,
+                  },
+                  params.reasoning
+                ),
                 null,
                 2
               ),
@@ -181,6 +193,7 @@ export function registerDiscoveryTools(
     {
       product_id: z.string().describe("The merchant's product or offer ID (e.g. SKU or ISBN)"),
       session_id: z.string().optional().describe("Optional active session ID for authenticated access"),
+      reasoning: reasoningSchema,
     },
     async (params) => {
       const trackId = `lookup_${params.product_id}`;
@@ -204,13 +217,19 @@ export function registerDiscoveryTools(
 
       try {
         const offer = await connector.getProduct(params.product_id, sessionToken);
-        auditLedger.append(toolCompletedEvent(trackId, "get_product", { offer_id: offer.offer_id }));
+        auditLedger.append(
+          toolCompletedEvent(
+            trackId,
+            "get_product",
+            withReasoning({ offer_id: offer.offer_id }, params.reasoning)
+          )
+        );
 
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify(offer, null, 2),
+              text: JSON.stringify(withReasoning(offer as any, params.reasoning), null, 2),
             },
           ],
         };
@@ -238,6 +257,7 @@ export function registerDiscoveryTools(
         .string()
         .optional()
         .describe("Parent category ID to browse children of. Omit for root categories."),
+      reasoning: reasoningSchema,
     },
     async (params) => {
       const trackId = `cat_${Date.now()}`;
@@ -295,18 +315,27 @@ export function registerDiscoveryTools(
             : undefined,
         }));
 
-        auditLedger.append(toolCompletedEvent(trackId, "browse_categories", { count: categories.length }));
+        auditLedger.append(
+          toolCompletedEvent(
+            trackId,
+            "browse_categories",
+            withReasoning({ count: categories.length }, params.reasoning)
+          )
+        );
 
         return {
           content: [
             {
               type: "text",
               text: JSON.stringify(
-                {
-                  categories,
-                  usable_as_filter: treeConfig.usable_as_filter ?? true,
-                  filter_key: treeConfig.filter_key ?? "category",
-                },
+                withReasoning(
+                  {
+                    categories,
+                    usable_as_filter: treeConfig.usable_as_filter ?? true,
+                    filter_key: treeConfig.filter_key ?? "category",
+                  },
+                  params.reasoning
+                ),
                 null,
                 2
               ),
@@ -330,6 +359,7 @@ export function registerDiscoveryTools(
     "Get search suggestions as the user types. Returns typeahead suggestions.",
     {
       query: z.string().describe("Partial search text"),
+      reasoning: reasoningSchema,
     },
     async (params) => {
       const trackId = `ac_${Date.now()}`;
@@ -377,13 +407,19 @@ export function registerDiscoveryTools(
             : undefined,
         }));
 
-        auditLedger.append(toolCompletedEvent(trackId, "autocomplete", { count: suggestions.length }));
+        auditLedger.append(
+          toolCompletedEvent(
+            trackId,
+            "autocomplete",
+            withReasoning({ count: suggestions.length }, params.reasoning)
+          )
+        );
 
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify({ suggestions }, null, 2),
+              text: JSON.stringify(withReasoning({ suggestions }, params.reasoning), null, 2),
             },
           ],
         };
@@ -408,6 +444,7 @@ export function registerDiscoveryTools(
       variant: z.record(z.string()).optional().describe("Selected variant options, e.g. { size: 'XL', color: 'red' }"),
       date: z.string().optional().describe("Date to check (ISO 8601, for time-slot/calendar merchants)"),
       session_id: z.string().optional().describe("Optional active session ID for authenticated availability check"),
+      reasoning: reasoningSchema,
     },
     async (params) => {
       const trackId = `avail_${Date.now()}`;
@@ -432,16 +469,23 @@ export function registerDiscoveryTools(
       try {
         const result = await connector.checkAvailability(params.product_id, params.variant, params.date, sessionToken);
         auditLedger.append(
-          toolCompletedEvent(trackId, "check_availability", {
-            product_id: params.product_id,
-            available: result.available,
-          })
+          toolCompletedEvent(
+            trackId,
+            "check_availability",
+            withReasoning(
+              {
+                product_id: params.product_id,
+                available: result.available,
+              },
+              params.reasoning
+            )
+          )
         );
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify(result, null, 2),
+              text: JSON.stringify(withReasoning(result as any, params.reasoning), null, 2),
             },
           ],
         };
@@ -465,8 +509,10 @@ export function registerDiscoveryTools(
   server.tool(
     "get_merchant_info",
     "Get information about this merchant: name, description, commerce domain, currency, supported capabilities, and available search refinements.",
-    {},
-    async () => {
+    {
+      reasoning: reasoningSchema,
+    },
+    async (params) => {
       const refinementConfig = manifest.refinements;
       const staticFilters = refinementConfig?.static_filters ?? manifest.filters ?? [];
       const matrix = deriveCapabilityMatrix(manifest);
@@ -539,7 +585,7 @@ export function registerDiscoveryTools(
         content: [
           {
             type: "text",
-            text: JSON.stringify(merchantInfo, null, 2),
+            text: JSON.stringify(withReasoning(merchantInfo as any, params?.reasoning), null, 2),
           },
         ],
       };

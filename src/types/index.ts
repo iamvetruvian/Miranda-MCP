@@ -301,6 +301,9 @@ export interface MerchantVerifiedCheckout {
   total: Money;
   available: boolean;
   expires_at?: string;
+  checkout_jwt?: string;
+  checkout_hash?: string;
+  payment_url?: string;
   raw_merchant_data?: Record<string, unknown>;
 }
 
@@ -314,20 +317,23 @@ export interface RefundRecord {
 }
 
 export interface PaymentBinding {
-  provider: "razorpay";
+  provider: "stripe";
   payment_method?: "payment_link" | "recurring_token";
-  razorpay_order_id?: string;
-  razorpay_payment_id?: string;
+  stripe_payment_intent_id?: string;
+  stripe_checkout_session_id?: string;
+  stripe_setup_session_id?: string;
+  stripe_setup_intent_id?: string;
   payment_link_url?: string;
   payment_link_id?: string;
   one_time_payment_url?: string;
+  card_vault_setup_url?: string;
+  setup_card_url?: string;
   autopay_mandate_url?: string;
-  razorpay_mandate_order_id?: string;
   payment_status: "pending" | "authorized" | "captured" | "failed";
   customer_id?: string;
   customer_email?: string;
   customer_contact?: string;
-  recurring_token_id?: string;
+  recurring_token_id?: string; // Stripe PaymentMethod ID (pm_...)
   token_captured?: boolean;
   refunds?: RefundRecord[];
   refunded_amount?: number;

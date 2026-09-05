@@ -60,9 +60,8 @@ const manifest: IntegrationManifest = {
     },
   },
   payment: {
-    provider: "razorpay",
-    razorpay_key_id_env: "RAZORPAY_KEY_ID",
-    razorpay_key_secret_env: "RAZORPAY_KEY_SECRET",
+    provider: "stripe",
+    stripe_secret_key_env: "STRIPE_SECRET_KEY",
   },
 };
 
@@ -204,7 +203,7 @@ describe("End-to-End Autonomous Agent Payments via Razorpay Recurring Tokens", (
     paymentAdapter.simulatePaymentSuccess(
       "pay_manual_first_999",
       { amount: 499900, currency: "INR" },
-      txn.payment?.razorpay_order_id
+      txn.payment?.stripe_checkout_session_id || txn.payment?.stripe_payment_intent_id
     );
 
     // 3. Agent polls transaction status
@@ -282,7 +281,7 @@ describe("End-to-End Autonomous Agent Payments via Razorpay Recurring Tokens", (
     expect(payload.state).toBe(TransactionState.ORDER_CONFIRMED);
     expect(payload.payment.status).toBe("payment_completed");
     expect(payload.payment.payment_method).toBe("recurring_token");
-    expect(payload.payment.payment_id).toMatch(/^pay_rec_sim_/);
+    expect(payload.payment.payment_id).toMatch(/^(pi_off|pay_rec)_sim_/);
     expect(payload.payment.message).toContain("Payment completed autonomously");
     expect(payload.order.order_id).toBeDefined();
     expect(payload.order.status).toBe("confirmed");

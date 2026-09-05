@@ -107,6 +107,7 @@ export class SqliteStore implements PersistenceStore {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS user_sessions (
         session_id TEXT PRIMARY KEY,
+        merchant_id TEXT NOT NULL DEFAULT '',
         status TEXT NOT NULL,
         authenticated_at INTEGER,
         session_expires_at INTEGER NOT NULL,
@@ -115,16 +116,41 @@ export class SqliteStore implements PersistenceStore {
       CREATE INDEX IF NOT EXISTS idx_sessions_expires ON user_sessions(session_expires_at);
     `);
 
-    // Recurring tokens table (Razorpay autonomous payment tokens)
+    // Migration: add merchant_id column if table already exists without it
+    try {
+      const userSessionCols = this.db.prepare("PRAGMA table_info(user_sessions);").all() as Array<{ name: string }>;
+      if (!userSessionCols.some((c) => c.name === "merchant_id")) {
+        this.db.exec("ALTER TABLE user_sessions ADD COLUMN merchant_id TEXT NOT NULL DEFAULT '';");
+      }
+    } catch {}
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_sessions_merchant ON user_sessions(merchant_id);
+    `);
+
+    // Recurring tokens table (Stripe/payment gateway autonomous payment tokens)
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS recurring_tokens (
         customer_id TEXT PRIMARY KEY,
+        merchant_id TEXT NOT NULL DEFAULT '',
         token_id TEXT NOT NULL,
         method TEXT NOT NULL,
         created_at TEXT NOT NULL,
         data TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_recurring_tokens_token_id ON recurring_tokens(token_id);
+    `);
+
+    // Migration: add merchant_id column if table already exists without it
+    try {
+      const recurringCols = this.db.prepare("PRAGMA table_info(recurring_tokens);").all() as Array<{ name: string }>;
+      if (!recurringCols.some((c) => c.name === "merchant_id")) {
+        this.db.exec("ALTER TABLE recurring_tokens ADD COLUMN merchant_id TEXT NOT NULL DEFAULT '';");
+      }
+    } catch {}
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_recurring_tokens_merchant ON recurring_tokens(merchant_id);
     `);
   }
 
@@ -269,10 +295,12 @@ export class SqliteStore implements PersistenceStore {
   }
 
   async saveSession(session: UserSession): Promise<void> {
+    const merchantId = session.merchant_id || "";
     const stmt = this.db.prepare(`
-      INSERT INTO user_sessions (session_id, status, authenticated_at, session_expires_at, data)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO user_sessions (session_id, merchant_id, status, authenticated_at, session_expires_at, data)
+      VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(session_id) DO UPDATE SET
+        merchant_id = excluded.merchant_id,
         status = excluded.status,
         authenticated_at = excluded.authenticated_at,
         session_expires_at = excluded.session_expires_at,
@@ -280,6 +308,7 @@ export class SqliteStore implements PersistenceStore {
     `);
     stmt.run(
       session.session_id,
+      merchantId,
       session.status || "authenticated",
       session.authenticated_at ?? null,
       session.session_expires_at,
@@ -299,16 +328,19 @@ export class SqliteStore implements PersistenceStore {
   }
 
   async saveRecurringToken(token: RecurringToken): Promise<void> {
+    const merchantId = token.merchant_id || "";
     const stmt = this.db.prepare(`
-      INSERT INTO recurring_tokens (customer_id, token_id, method, created_at, data)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO recurring_tokens (customer_id, merchant_id, token_id, method, created_at, data)
+      VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(customer_id) DO UPDATE SET
+        merchant_id = excluded.merchant_id,
         token_id = excluded.token_id,
         method = excluded.method,
         data = excluded.data;
     `);
     stmt.run(
       token.customer_id,
+      merchantId,
       token.token_id,
       token.method,
       token.created_at,

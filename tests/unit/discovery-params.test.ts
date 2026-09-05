@@ -5,7 +5,7 @@ import { registerTransactionTools } from "../../src/tools/transaction.js";
 import { ConnectorRuntime } from "../../src/connector/runtime.js";
 import { TransactionManager } from "../../src/transaction/manager.js";
 import { PolicyEngine } from "../../src/policy/engine.js";
-import { RazorpayAdapter } from "../../src/payment/razorpay.js";
+import { StripeAdapter } from "../../src/payment/stripe.js";
 import { AuditLedger } from "../../src/audit/ledger.js";
 import { IntegrationManifest } from "../../src/types/manifest.js";
 import { TransactionState } from "../../src/types/index.js";
@@ -66,9 +66,8 @@ const nonRetailManifest: IntegrationManifest = {
     },
   },
   payment: {
-    provider: "razorpay",
-    razorpay_key_id_env: "RAZORPAY_KEY_ID",
-    razorpay_key_secret_env: "RAZORPAY_KEY_SECRET",
+    provider: "stripe",
+    stripe_secret_key_env: "STRIPE_SECRET_KEY",
   },
 };
 
@@ -78,7 +77,7 @@ describe("Component 4: Domain-Agnostic Discovery & Ephemeral Offers", () => {
   let auditLedger: AuditLedger;
   let txnManager: TransactionManager;
   let policyEngine: PolicyEngine;
-  let paymentAdapter: RazorpayAdapter;
+  let paymentAdapter: StripeAdapter;
 
   beforeEach(() => {
     server = new McpServer({ name: "TicketMCP", version: "1.0.0" });
@@ -86,7 +85,7 @@ describe("Component 4: Domain-Agnostic Discovery & Ephemeral Offers", () => {
     auditLedger = new AuditLedger();
     txnManager = new TransactionManager(auditLedger);
     policyEngine = new PolicyEngine();
-    paymentAdapter = new RazorpayAdapter("mock_key", "mock_secret", true);
+    paymentAdapter = new StripeAdapter("mock_key", undefined, true);
 
     registerDiscoveryTools(server, connector, nonRetailManifest, auditLedger);
     registerTransactionTools(server, connector, txnManager, policyEngine, paymentAdapter, auditLedger);

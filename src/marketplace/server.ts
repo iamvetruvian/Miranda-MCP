@@ -6,6 +6,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { MarketplaceGateway } from "./gateway.js";
+import { reasoningSchema, withReasoning } from "../tools/reasoning.js";
 
 export function createMarketplaceMcpServer(gateway: MarketplaceGateway): McpServer {
   const server = new McpServer({
@@ -17,14 +18,16 @@ export function createMarketplaceMcpServer(gateway: MarketplaceGateway): McpServ
   server.tool(
     "list_merchants",
     "List all available merchants connected to the marketplace gateway with their supported domains and currencies.",
-    {},
-    async () => {
+    {
+      reasoning: reasoningSchema,
+    },
+    async (params) => {
       const merchants = gateway.listMerchants();
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify({ merchants }, null, 2),
+            text: JSON.stringify(withReasoning({ merchants }, params?.reasoning), null, 2),
           },
         ],
       };
@@ -42,6 +45,7 @@ export function createMarketplaceMcpServer(gateway: MarketplaceGateway): McpServ
       page: z.number().int().positive().optional().describe("Page number for pagination (default: 1)"),
       page_size: z.number().int().positive().optional().describe("Page size (default: 20)"),
       sort: z.enum(["price_asc", "price_desc", "relevance"]).optional().describe("Sort ordering"),
+      reasoning: reasoningSchema,
     },
     async (params) => {
       const result = await gateway.search({
@@ -57,7 +61,7 @@ export function createMarketplaceMcpServer(gateway: MarketplaceGateway): McpServ
         content: [
           {
             type: "text",
-            text: JSON.stringify(result, null, 2),
+            text: JSON.stringify(withReasoning(result as any, params.reasoning), null, 2),
           },
         ],
       };
@@ -71,6 +75,7 @@ export function createMarketplaceMcpServer(gateway: MarketplaceGateway): McpServ
     {
       merchant_id: z.string().describe("Merchant identifier (e.g. techbazaar, pageturner)"),
       product_id: z.string().describe("Merchant-specific SKU or product ID"),
+      reasoning: reasoningSchema,
     },
     async (params) => {
       const product = await gateway.getProduct(params.merchant_id, params.product_id);
@@ -78,7 +83,7 @@ export function createMarketplaceMcpServer(gateway: MarketplaceGateway): McpServ
         content: [
           {
             type: "text",
-            text: JSON.stringify(product, null, 2),
+            text: JSON.stringify(withReasoning(product as any, params.reasoning), null, 2),
           },
         ],
       };
@@ -94,6 +99,7 @@ export function createMarketplaceMcpServer(gateway: MarketplaceGateway): McpServ
       product_id: z.string().describe("Product SKU or offer ID"),
       quantity: z.number().int().positive().default(1).describe("Quantity to purchase"),
       variant: z.record(z.string()).optional().describe("Optional variant attributes"),
+      reasoning: reasoningSchema,
     },
     async (params) => {
       const checkout = await gateway.createCheckout(
@@ -106,7 +112,7 @@ export function createMarketplaceMcpServer(gateway: MarketplaceGateway): McpServ
         content: [
           {
             type: "text",
-            text: JSON.stringify(checkout, null, 2),
+            text: JSON.stringify(withReasoning(checkout as any, params.reasoning), null, 2),
           },
         ],
       };
@@ -120,6 +126,7 @@ export function createMarketplaceMcpServer(gateway: MarketplaceGateway): McpServ
     {
       merchant_id: z.string().describe("Merchant identifier"),
       order_id: z.string().describe("Merchant order number"),
+      reasoning: reasoningSchema,
     },
     async (params) => {
       const order = await gateway.getOrderStatus(params.merchant_id, params.order_id);
@@ -127,7 +134,7 @@ export function createMarketplaceMcpServer(gateway: MarketplaceGateway): McpServ
         content: [
           {
             type: "text",
-            text: JSON.stringify(order, null, 2),
+            text: JSON.stringify(withReasoning(order as any, params.reasoning), null, 2),
           },
         ],
       };
@@ -142,6 +149,7 @@ export function createMarketplaceMcpServer(gateway: MarketplaceGateway): McpServ
       merchant_id: z.string().describe("Merchant identifier"),
       order_id: z.string().describe("Merchant order number"),
       reason: z.string().optional().describe("Cancellation reason"),
+      reasoning: reasoningSchema,
     },
     async (params) => {
       const result = await gateway.cancelOrder(params.merchant_id, params.order_id, params.reason);
@@ -149,7 +157,7 @@ export function createMarketplaceMcpServer(gateway: MarketplaceGateway): McpServ
         content: [
           {
             type: "text",
-            text: JSON.stringify(result, null, 2),
+            text: JSON.stringify(withReasoning(result as any, params.reasoning), null, 2),
           },
         ],
       };

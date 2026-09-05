@@ -259,8 +259,9 @@ export class RefundBoundsGate implements PolicyGate {
     }
 
     const payment = txn.payment;
-    if (!payment?.razorpay_payment_id) {
-      return { gate: this.name, result: "FAIL", detail: "No Razorpay payment bound to this transaction" };
+    const paymentId = payment?.stripe_payment_intent_id || (payment as any)?.razorpay_payment_id;
+    if (!payment || !paymentId) {
+      return { gate: this.name, result: "FAIL", detail: "No payment bound to this transaction" };
     }
     if (payment.payment_status !== "captured") {
       return {
@@ -581,6 +582,17 @@ export class MandateBoundsGate implements PolicyGate {
         result: "FAIL",
         detail: `Parent intent mandate expired at ${intent.constraints.expires_at}`,
       };
+    }
+
+    if (this.mandateStore.getConsumedBudget) {
+      const consumed = this.mandateStore.getConsumedBudget(intent.mandate_id);
+      if (consumed > intent.constraints.max_amount) {
+        return {
+          gate: this.name,
+          result: "FAIL",
+          detail: `Cumulative budget exceeded: total spent ${consumed} exceeds limit ${intent.constraints.max_amount}`,
+        };
+      }
     }
 
     return {

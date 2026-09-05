@@ -153,8 +153,8 @@ export class OAuth2Handler {
 
     let userInfo = this.extractUserInfo(tokenData);
 
-    // If user info is not present in token response and userinfo_url is declared, fetch it
-    if ((!userInfo.user_id || !userInfo.user_name) && this.config.userinfo_url) {
+    // If user info or shipping address is not present in token response and userinfo_url is declared, fetch it
+    if ((!userInfo.user_id || !userInfo.user_name || !userInfo.user_email || !userInfo.shipping_address) && this.config.userinfo_url) {
       try {
         const userRes = await fetch(this.config.userinfo_url, {
           method: "GET",
@@ -169,6 +169,10 @@ export class OAuth2Handler {
           userInfo = {
             user_id: userInfo.user_id || fetchedInfo.user_id,
             user_name: userInfo.user_name || fetchedInfo.user_name,
+            user_email: userInfo.user_email || fetchedInfo.user_email,
+            user_contact: userInfo.user_contact || fetchedInfo.user_contact,
+            shipping_address: userInfo.shipping_address || fetchedInfo.shipping_address,
+            shipping_addresses: userInfo.shipping_addresses || fetchedInfo.shipping_addresses,
           };
         }
       } catch (err) {
@@ -351,11 +355,49 @@ export class OAuth2Handler {
       userContact = String(rawContact);
     }
 
+    let shippingAddress: Record<string, unknown> | undefined = undefined;
+    let shippingAddresses: Array<Record<string, unknown>> | undefined = undefined;
+
+    if (this.config.shipping_address_path) {
+      const val = this.mapper.resolvePath(data, this.config.shipping_address_path);
+      if (val && typeof val === "object") shippingAddress = val as Record<string, unknown>;
+    } else {
+      const candidate =
+        (data as any)?.shipping_address ??
+        (data as any)?.shippingAddress ??
+        (data as any)?.user?.shipping_address ??
+        (data as any)?.user?.shippingAddress ??
+        (data as any)?.address ??
+        (data as any)?.user?.address;
+      if (candidate && typeof candidate === "object") {
+        shippingAddress = candidate as Record<string, unknown>;
+      }
+    }
+
+    if (this.config.shipping_addresses_path) {
+      const val = this.mapper.resolvePath(data, this.config.shipping_addresses_path);
+      if (Array.isArray(val)) shippingAddresses = val as Array<Record<string, unknown>>;
+    } else {
+      const candidateList =
+        (data as any)?.shipping_addresses ??
+        (data as any)?.addresses ??
+        (data as any)?.user?.addresses;
+      if (Array.isArray(candidateList)) {
+        shippingAddresses = candidateList as Array<Record<string, unknown>>;
+      }
+    }
+
+    if (!shippingAddress && shippingAddresses && shippingAddresses.length > 0) {
+      shippingAddress = shippingAddresses[0];
+    }
+
     return {
       user_id: userId,
       user_name: userName,
       user_email: userEmail,
       user_contact: userContact,
+      shipping_address: shippingAddress,
+      shipping_addresses: shippingAddresses,
     };
   }
 }

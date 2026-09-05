@@ -95,9 +95,8 @@ const sampleV2Manifest: IntegrationManifest = {
     },
   },
   payment: {
-    provider: "razorpay",
-    razorpay_key_id_env: "OMNI_KEY",
-    razorpay_key_secret_env: "OMNI_SECRET",
+    provider: "stripe",
+    stripe_secret_key_env: "OMNI_STRIPE_SECRET",
   },
 };
 
@@ -190,9 +189,8 @@ describe("Manifest v2 Schema & Diagnostics", () => {
         },
       },
       payment: {
-        provider: "razorpay",
-        razorpay_key_id_env: "MIN_KEY",
-        razorpay_key_secret_env: "MIN_SECRET",
+        provider: "stripe",
+        stripe_secret_key_env: "MIN_STRIPE_SECRET",
       },
     };
 

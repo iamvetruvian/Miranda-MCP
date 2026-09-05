@@ -156,6 +156,8 @@ export const OAuth2UserFlowConfigSchema = z.object({
   user_id_path: z.string().optional(),
   user_name_path: z.string().optional(),
   userinfo_url: z.string().url().optional(),
+  shipping_address_path: z.string().optional(),
+  shipping_addresses_path: z.string().optional(),
   use_pkce: z.boolean().optional(),
   session_ttl_seconds: z.number().positive().optional(),
   additional_auth_params: z.record(z.string()).optional(),
@@ -332,17 +334,16 @@ export const IntegrationConfigSchema = z.object({
 });
 
 export const PaymentConfigSchema = z.object({
-  provider: z.literal("razorpay"),
-  razorpay_key_id_env: z.string().min(1, "Razorpay Key ID env name is required"),
-  razorpay_key_secret_env: z.string().min(1, "Razorpay Key Secret env name is required"),
+  provider: z.literal("stripe"),
+  stripe_secret_key_env: z.string().min(1, "Stripe Secret Key env name is required"),
+  stripe_publishable_key_env: z.string().optional(),
   webhook_secret_env: z.string().optional(),
   integration_type: z
     .enum([
-      "orders_and_links",
-      "orders_only",
-      "links_only",
-      "subscriptions",
+      "payment_intents_and_checkout",
+      "payment_intents_only",
       "checkout_only",
+      "orders_and_links",
     ])
     .optional(),
   capture: z
@@ -431,6 +432,18 @@ export const CustomHooksConfigSchema = z.object({
   declared_hooks: z.array(z.string()),
 });
 
+export const TelemetryConfigSchema = z.object({
+  endpoint: z.string().url("Telemetry endpoint must be a valid URL (e.g. https://api.honeycomb.io/v1/logs)"),
+  provider: z.enum(["honeycomb", "grafana_loki", "otlp_generic"]).or(z.string()).optional(),
+  service_name: z.string().optional(),
+  api_key_env: z.string().optional(),
+  api_key: z.string().optional(),
+  headers: z.record(z.string()).optional(),
+  headers_env: z.string().optional(),
+  batch_size: z.number().int().positive().optional(),
+  flush_interval_ms: z.number().int().positive().optional(),
+});
+
 export const IntegrationManifestSchema = z.object({
   merchant: MerchantBlockSchema,
   auth: AuthConfigSchema.optional(),
@@ -439,6 +452,8 @@ export const IntegrationManifestSchema = z.object({
   error_mapping: ErrorMappingSchema.optional(),
   webhooks: WebhookConfigSchema.optional(),
   integration: IntegrationConfigSchema.optional(),
+  telemetry: TelemetryConfigSchema.optional(),
+  audit: TelemetryConfigSchema.optional(),
   intent: z.record(z.unknown()).optional(),
   operations: z.object({
     search: OperationMappingSchema,

@@ -418,6 +418,36 @@ export class ConnectorRuntime {
       amount: Math.round((parsed.data.total.amount || 0) / quantity),
       currency: parsed.data.total.currency || this.manifest.merchant.currency,
     };
+
+    let paymentUrl = parsed.data.payment_url;
+    if (!paymentUrl) {
+      if (this.manifest.operations.custom?.create_payment_link) {
+        try {
+          const linkRaw = await this.executeOperationFromConfig(
+            this.manifest.operations.custom.create_payment_link,
+            { checkout_id: parsed.data.checkout_id },
+            "create_payment_link",
+            sessionToken
+          );
+          paymentUrl = (linkRaw as any)?.url || (linkRaw as any)?.payment_url || (linkRaw as any)?.short_url;
+        } catch (linkErr) {
+          console.warn("[ConnectorRuntime] Failed to fetch create_payment_link from merchant backend:", linkErr);
+        }
+      } else if (this.manifest.transaction?.payment_link_operation) {
+        try {
+          const linkRaw = await this.executeOperationFromConfig(
+            this.manifest.transaction.payment_link_operation,
+            { checkout_id: parsed.data.checkout_id },
+            "payment_link",
+            sessionToken
+          );
+          paymentUrl = (linkRaw as any)?.url || (linkRaw as any)?.payment_url || (linkRaw as any)?.short_url;
+        } catch (linkErr) {
+          console.warn("[ConnectorRuntime] Failed to fetch payment_link_operation from merchant backend:", linkErr);
+        }
+      }
+    }
+
     let checkout: MerchantVerifiedCheckout = {
       checkout_id: parsed.data.checkout_id,
       sku: parsed.data.sku || productId,
@@ -426,6 +456,7 @@ export class ConnectorRuntime {
       total: parsed.data.total,
       available: parsed.data.available,
       expires_at: parsed.data.expires_at,
+      payment_url: paymentUrl,
       raw_merchant_data:
         typeof rawResponse === "object" && rawResponse !== null
           ? (rawResponse as Record<string, unknown>)
@@ -466,6 +497,7 @@ export class ConnectorRuntime {
       total: parsed.data.total,
       available: parsed.data.available,
       expires_at: parsed.data.expires_at,
+      payment_url: parsed.data.payment_url,
       raw_merchant_data:
         typeof rawResponse === "object" && rawResponse !== null
           ? (rawResponse as Record<string, unknown>)
@@ -510,6 +542,58 @@ export class ConnectorRuntime {
       throw new Error(`Merchant returned invalid order confirmation response: ${parsed.error.message}`);
     }
     return parsed.data;
+  }
+
+  /**
+   * Execute an authorized Server-to-Server (S2S) charge against the merchant payment endpoint.
+   */
+  async chargeToken(
+    checkoutId: string,
+    tokenId: string,
+    amount: Money,
+    sessionToken?: string
+  ): Promise<MerchantOrderBinding> {
+    const chargeOp =
+      this.manifest.transaction?.charge_token_operation ||
+      (this.manifest.operations.custom?.charge_token ? {
+        ...this.manifest.operations.custom.charge_token,
+      } : undefined);
+
+    if (chargeOp) {
+      const chargeParams: Record<string, unknown> = {
+        checkout_id: checkoutId,
+        order_id: checkoutId,
+        token: tokenId,
+        recurring_token: tokenId,
+        payment_token: tokenId,
+        amount: amount.amount,
+        currency: amount.currency,
+      };
+      const rawResponse = await this.executeOperationFromConfig(
+        chargeOp,
+        chargeParams,
+        "charge_token",
+        sessionToken
+      );
+      const mapped = this.responseMapper.mapOne<MerchantOrderBinding>(
+        this.manifest.field_mappings.order,
+        rawResponse
+      );
+      const parsed = OrderConfirmationSchema.safeParse(mapped);
+      if (parsed.success) {
+        return parsed.data;
+      }
+      return {
+        order_id: (rawResponse as any)?.order_id || checkoutId,
+        status: (rawResponse as any)?.status || "confirmed",
+        confirmed_at: new Date().toISOString(),
+      };
+    }
+
+    // Default: call confirmOrder with the payment token ID
+    return this.confirmOrder(checkoutId, tokenId, {
+      sessionToken,
+    });
   }
 
   /**
@@ -599,7 +683,7 @@ export class ConnectorRuntime {
     }
 
     if (!activeCartId) {
-      activeCartId = `cart_${crypto.randomUUID()}`;
+      activeCartId = `cart_${crypto.randomBytes(8).toString("hex")}`;
     }
 
     const addParams: Record<string, unknown> = {

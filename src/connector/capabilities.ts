@@ -254,8 +254,8 @@ export function deriveCapabilityMatrix(
 
     // ── Stage 5: Payment ──
     payment: {
-      supported: Boolean(payment?.provider === "razorpay"),
-      provided_by: ["razorpay"],
+      supported: Boolean(payment?.provider === "stripe"),
+      provided_by: ["stripe"],
       required_for_transactable: true,
     },
     emi: {

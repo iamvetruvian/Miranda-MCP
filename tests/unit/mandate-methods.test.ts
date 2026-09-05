@@ -1,7 +1,7 @@
 import { describe, it, expect, afterAll } from "vitest";
 import { startAuthCallbackServer, AuthCallbackServerResult } from "../../src/auth/callback-server.js";
 import { IntegrationManifest } from "../../src/types/manifest.js";
-import { RazorpayAdapter } from "../../src/payment/razorpay.js";
+import { StripeAdapter } from "../../src/payment/stripe.js";
 
 describe("Mandate Payment Method Restrictions (Card & UPI Autopay Only)", () => {
   let serverResult: AuthCallbackServerResult | undefined;
@@ -30,12 +30,10 @@ describe("Mandate Payment Method Restrictions (Card & UPI Autopay Only)", () => 
       },
     },
     payment: {
-      gateway: "razorpay",
-      key_id_env: "RAZORPAY_KEY_ID",
-      key_secret_env: "RAZORPAY_KEY_SECRET",
-      supported_methods: ["card", "upi"],
-      currency: "INR",
-    },
+      provider: "stripe",
+      stripe_secret_key_env: "STRIPE_SECRET_KEY",
+      allowed_methods: { methods: ["card"] },
+    } as any,
   };
 
   afterAll(async () => {
@@ -59,26 +57,13 @@ describe("Mandate Payment Method Restrictions (Card & UPI Autopay Only)", () => 
     expect(html).toContain("Autopay Mandate Enabled");
     expect(html).toContain("Restricted to Autopay Instruments");
 
-    // Verify Razorpay Checkout options restrict payment methods to card and upi
-    expect(html).toContain("card: true");
-    expect(html).toContain("upi: true");
-    expect(html).toContain("netbanking: false");
-    expect(html).toContain("wallet: false");
-    expect(html).toContain("emi: false");
-    expect(html).toContain("paylater: false");
-
-    // Verify custom display blocks & preferences to disallow other payment options
-    expect(html).toContain("mandate_methods");
-    expect(html).toContain("Autopay Mandate Supported");
-    expect(html).toContain("show_default_blocks: false");
-
-    // Verify prefill customer credentials
-    expect(html).toContain('email: "alice@example.com"');
-    expect(html).toContain('contact: "+919876543210"');
-    expect(html).toContain('customer_id: "cust_alice_001"');
+    // Verify Stripe Card Vaulting UI
+    expect(html).toContain("4242 4242 4242 4242");
+    expect(html).toContain("Never triggers OTP or 36h delay");
+    expect(html).toContain("Stripe Test Mode Card Details");
   });
 
-  it("should NOT restrict payment methods on /pay when mode=one_time", async () => {
+  it("should display one-time payment UI on /pay when mode=one_time", async () => {
     const res = await fetch(
       `http://localhost:${PORT}/pay?order_id=order_onetime_002&amount=6899900&currency=INR&desc=Single+Order+Payment&mode=one_time`
     );
@@ -88,13 +73,10 @@ describe("Mandate Payment Method Restrictions (Card & UPI Autopay Only)", () => 
 
     // Single payment banner
     expect(html).toContain("Single One-Time Payment");
-    // Does NOT restrict netbanking
-    expect(html).not.toContain("netbanking: false");
-    expect(html).not.toContain("show_default_blocks: false");
   });
 
-  it("should support restricting methods to card and upi in RazorpayAdapter createPaymentLink", async () => {
-    const adapter = new RazorpayAdapter("mock_key", "mock_secret", true);
+  it("should support creating payment link in StripeAdapter createPaymentLink", async () => {
+    const adapter = new StripeAdapter("mock_key", undefined, true);
 
     const link = await adapter.createPaymentLink({
       amount: { amount: 100000, currency: "INR" },

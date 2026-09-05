@@ -54,7 +54,7 @@ export function generateDecisionReceipt(
       .join("\n");
 
     refundsSection = `
-6. REFUND ORCHESTRATION (Razorpay Rails)
+6. REFUND ORCHESTRATION (Stripe Rails)
    Total Refunded   : ${formatCurrency(refundedAmount)}
    Net Settled      : ${formatCurrency(netSettled)}
 ${refundLines}
@@ -90,10 +90,9 @@ ${checksFormatted}
    Overall Decision : ${txn.policy_decision?.decision ?? "N/A"}
    Gate Token       : ${txn.policy_decision?.gate_token ?? "None"}
 
-4. PAYMENT ORCHESTRATION (Razorpay)
-   Provider         : Razorpay
-   Order ID         : ${txn.payment?.razorpay_order_id ?? "N/A"}
-   Payment ID       : ${txn.payment?.razorpay_payment_id ?? "Pending / Not Captured"}
+4. PAYMENT ORCHESTRATION (Stripe)
+   Provider         : Stripe
+   Payment Intent ID: ${txn.payment?.stripe_payment_intent_id ?? (txn.payment as any)?.razorpay_payment_id ?? "Pending / Not Captured"}
    Payment Link     : ${txn.payment?.payment_link_url ?? "N/A"}
    Payment Status   : ${txn.payment?.payment_status?.toUpperCase() ?? "PENDING"}
 

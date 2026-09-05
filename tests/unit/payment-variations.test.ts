@@ -5,15 +5,16 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { RazorpayAdapter } from "../../src/payment/razorpay.js";
+import { StripeAdapter } from "../../src/payment/stripe.js";
 import { PaymentConfig } from "../../src/types/manifest.js";
 
 describe("Component 6: Payment Variations", () => {
-  it("should configure manual capture mode and partial payments in RazorpayAdapter", async () => {
-    const adapter = new RazorpayAdapter(); // Simulation mode
+  it("should configure manual capture mode and partial payments in StripeAdapter", async () => {
+    const adapter = new StripeAdapter(); // Simulation mode
 
-    const paymentConfig: PaymentConfig = {
-      provider: "razorpay",
+    const paymentConfig: any = {
+      provider: "stripe",
+      stripe_secret_key_env: "STRIPE_SECRET_KEY",
       capture: {
         mode: "manual_capture",
         manual_capture_timeout_seconds: 7200,
@@ -36,11 +37,12 @@ describe("Component 6: Payment Variations", () => {
     expect(orderResult.amount.amount).toBe(100000);
   });
 
-  it("should apply payment link expiration, notification, and method restrictions", async () => {
-    const adapter = new RazorpayAdapter();
+  it("should apply payment link expiration and method restrictions in StripeAdapter", async () => {
+    const adapter = new StripeAdapter();
 
-    const paymentConfig: PaymentConfig = {
-      provider: "razorpay",
+    const paymentConfig: any = {
+      provider: "stripe",
+      stripe_secret_key_env: "STRIPE_SECRET_KEY",
       payment_link: {
         expire_after_seconds: 1800,
         send_notification: true,
@@ -59,7 +61,7 @@ describe("Component 6: Payment Variations", () => {
     });
 
     expect(linkResult.payment_link_id).toBeDefined();
-    expect(linkResult.short_url).toContain("https://rzp.io/i/");
-    expect(linkResult.amount.amount).toBe(249900);
+    expect(linkResult.short_url).toContain("http://localhost:");
+    expect(linkResult.amount?.amount).toBe(249900);
   });
 });

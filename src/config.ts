@@ -46,7 +46,11 @@ export const RuntimeConfigSchema = z.object({
   /** Public base URL for external links (e.g. consent challenge URLs) */
   mcpPublicBaseUrl: z.string().default("http://localhost:4000"),
 
-  /** Razorpay credentials */
+  /** Stripe credentials */
+  stripeSecretKey: z.string().optional(),
+  stripePublishableKey: z.string().optional(),
+  stripeWebhookSecret: z.string().optional(),
+  /** Legacy Razorpay credentials (optional) */
   razorpayKeyId: z.string().optional(),
   razorpayKeySecret: z.string().optional(),
   razorpayWebhookSecret: z.string().optional(),
@@ -101,6 +105,9 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
       : 60,
     auditExportOtelEndpoint: env.AUDIT_EXPORT_OTEL_ENDPOINT || undefined,
     mcpPublicBaseUrl: env.MCP_PUBLIC_BASE_URL || `http://localhost:${env.PORT || 4000}`,
+    stripeSecretKey: env.STRIPE_SECRET_KEY || undefined,
+    stripePublishableKey: env.STRIPE_PUBLISHABLE_KEY || undefined,
+    stripeWebhookSecret: env.STRIPE_WEBHOOK_SECRET || undefined,
     razorpayKeyId: env.RAZORPAY_KEY_ID || undefined,
     razorpayKeySecret: env.RAZORPAY_KEY_SECRET || undefined,
     razorpayWebhookSecret: env.RAZORPAY_WEBHOOK_SECRET || undefined,

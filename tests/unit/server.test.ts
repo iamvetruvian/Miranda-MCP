@@ -283,11 +283,11 @@ describe("MerchantMCP Server & Tools Integration", () => {
     const parsed = JSON.parse(response.content[0].text);
     expect(parsed.state).toBe("PAYMENT_PENDING");
     expect(parsed.payment).toBeDefined();
-    expect(parsed.payment.payment_url).toContain("https://rzp.io/i/sim_");
+    expect(parsed.payment.payment_url).toContain("http://localhost:");
     expect(parsed.payment.methods).toBeDefined();
-    expect(parsed.payment.methods.payment_link.url).toContain("https://rzp.io/i/sim_");
+    expect(parsed.payment.methods.payment_link.url).toContain("http://localhost:");
     expect(parsed.payment.methods.checkout_sdk).toBeDefined();
-    expect(parsed.payment.methods.checkout_sdk.razorpay_key_id).toBe(instance.paymentAdapter.keyId);
+    expect(parsed.payment.methods.checkout_sdk.publishable_key).toBe(instance.paymentAdapter.publishableKey);
     expect(parsed.payment.methods.checkout_sdk.amount).toBe(6499900);
     expect(parsed.payment.methods.checkout_sdk.currency).toBe("INR");
     expect(parsed.payment.methods.checkout_sdk.merchant_name).toBe("TechBazaar");

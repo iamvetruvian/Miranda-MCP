@@ -12,7 +12,7 @@ import { buildUcpProfile } from "./ucp/profile.js";
 import { AuditLedger } from "./audit/ledger.js";
 import { PolicyEngine } from "./policy/engine.js";
 import { TransactionManager } from "./transaction/manager.js";
-import { RazorpayAdapter } from "./payment/razorpay.js";
+import { StripeAdapter } from "./payment/stripe.js";
 import { registerDiscoveryTools } from "./tools/discovery.js";
 import { registerRefinementTools } from "./tools/refinement.js";
 import { registerTransactionTools } from "./tools/transaction.js";
@@ -40,8 +40,39 @@ import { AuditExporter } from "./audit/exporter.js";
 import { loadRuntimeConfig } from "./config.js";
 import { listenWithPortRecovery } from "./utils/dev-port-killer.js";
 import { RecurringTokenStore } from "./payment/token-store.js";
+import { fileURLToPath } from "url";
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const projectRoot = path.resolve(__dirname, "..");
+
+// Load environment variables
 dotenv.config();
+const fallbackEnvPaths = [
+  path.resolve(projectRoot, ".env"),
+  path.resolve(process.cwd(), ".env"),
+  path.resolve(process.cwd(), "../.env"),
+  path.resolve(projectRoot, "demo/merchants/skateshop/.env"),
+];
+for (const envPath of fallbackEnvPaths) {
+  if (fs.existsSync(envPath)) {
+    dotenv.config({ path: envPath });
+  }
+}
+
+// Ensure aliases between equivalent Stripe env variables
+if (!process.env.STRIPE_API_KEY && process.env.STRIPE_SECRET_KEY) {
+  process.env.STRIPE_API_KEY = process.env.STRIPE_SECRET_KEY;
+}
+if (!process.env.STRIPE_SECRET_KEY && process.env.STRIPE_API_KEY) {
+  process.env.STRIPE_SECRET_KEY = process.env.STRIPE_API_KEY;
+}
+if (!process.env.STRIPE_PUBLISHABLE_KEY && process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY) {
+  process.env.STRIPE_PUBLISHABLE_KEY = process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY;
+}
+if (!process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY && process.env.STRIPE_PUBLISHABLE_KEY) {
+  process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY = process.env.STRIPE_PUBLISHABLE_KEY;
+}
 
 export interface SseServerResult {
   app: express.Express;
@@ -98,7 +129,8 @@ export function startHostedMerchantMcpServer(
   }
 
   const port = options.port ?? runtimeConfig?.port ?? 3000;
-  const dbPath = options.dbPath ?? runtimeConfig?.dbPath ?? process.env.MERCHANTMCP_DB_PATH;
+  const defaultDbPath = path.join(process.cwd(), "data", "merchant_mcp.db");
+  const dbPath = options.dbPath ?? runtimeConfig?.dbPath ?? process.env.MERCHANTMCP_DB_PATH ?? (process.env.NODE_ENV === "test" ? undefined : defaultDbPath);
   const store = options.store ?? (dbPath ? new SqliteStore(dbPath) : new InMemoryStore());
 
   const mandateStore = new MandateStore(
@@ -107,12 +139,19 @@ export function startHostedMerchantMcpServer(
     (options.authMode as any) ?? runtimeConfig?.authMode
   );
 
-  const sessionStore = new SessionStore(store, manifest.auth?.oauth2_user?.session_ttl_seconds);
+  const merchantId = manifest.merchant.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  const sessionStore = new SessionStore(store, manifest.auth?.oauth2_user?.session_ttl_seconds, merchantId);
   const oauth2Handler = manifest.auth?.oauth2_user
     ? new OAuth2Handler(manifest.auth.oauth2_user, sessionStore)
     : null;
   const authGuard = new AuthGuard(manifest, oauth2Handler, sessionStore);
-  const recurringTokenStore = new RecurringTokenStore();
+  const recurringTokenStore = new RecurringTokenStore(store, merchantId);
+  try {
+    const existingTokens = store.loadRecurringTokensSync ? store.loadRecurringTokensSync() : [];
+    recurringTokenStore.hydrate(existingTokens);
+  } catch (err) {
+    console.warn("[ServerSSE] Failed to hydrate recurring tokens from store:", err);
+  }
 
   const app = express();
   app.use(express.json());
@@ -147,9 +186,67 @@ export function startHostedMerchantMcpServer(
     store,
   });
 
-  const otelUrl = options.otelEndpoint ?? runtimeConfig?.auditExportOtelEndpoint ?? process.env.AUDIT_EXPORT_OTEL_ENDPOINT;
+  const telemetry = manifest.telemetry ?? manifest.audit;
+  const otelUrl =
+    options.otelEndpoint ??
+    telemetry?.endpoint ??
+    runtimeConfig?.auditExportOtelEndpoint ??
+    process.env.AUDIT_EXPORT_OTEL_ENDPOINT;
+
   if (otelUrl) {
-    const exporter = options.auditExporter ?? new AuditExporter({ endpointUrl: otelUrl });
+    const headers: Record<string, string> = { ...(telemetry?.headers ?? {}) };
+
+    // Resolve JSON headers from env if declared or default
+    const headersEnvKey = telemetry?.headers_env ?? "AUDIT_EXPORT_OTEL_HEADERS";
+    if (process.env[headersEnvKey]) {
+      try {
+        const parsed = JSON.parse(process.env[headersEnvKey]!);
+        if (typeof parsed === "object" && parsed !== null) {
+          Object.assign(headers, parsed);
+        }
+      } catch (err) {
+        console.warn(`[ServerSSE] Failed to parse ${headersEnvKey} as JSON:`, err);
+      }
+    }
+
+    // Resolve provider-specific authentication token from api_key, api_key_env, or default env
+    let apiKey: string | undefined = telemetry?.api_key;
+    if (!apiKey && telemetry?.api_key_env) {
+      if (process.env[telemetry.api_key_env]) {
+        apiKey = process.env[telemetry.api_key_env];
+      } else {
+        // Fallback: If api_key_env contains the raw API key literal instead of an env variable name
+        apiKey = telemetry.api_key_env;
+      }
+    }
+    if (!apiKey && (telemetry?.provider === "honeycomb" || otelUrl.includes("honeycomb.io"))) {
+      apiKey = process.env.HONEYCOMB_API_KEY;
+    }
+
+    if (apiKey) {
+      if (telemetry?.provider === "honeycomb" || otelUrl.includes("honeycomb.io")) {
+        headers["x-honeycomb-team"] = apiKey;
+      } else {
+        headers["Authorization"] = `Bearer ${apiKey}`;
+      }
+    } else if (telemetry?.provider === "honeycomb" || otelUrl.includes("honeycomb.io")) {
+      console.warn("[ServerSSE] Honeycomb telemetry configured, but no API key was found in environment or manifest.");
+    }
+
+    const serviceName =
+      telemetry?.service_name ??
+      `merchant-mcp-${manifest.merchant.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+
+    const exporter =
+      options.auditExporter ??
+      new AuditExporter({
+        endpointUrl: otelUrl,
+        serviceName,
+        batchSize: telemetry?.batch_size ?? 10,
+        flushIntervalMs: telemetry?.flush_interval_ms ?? 2000,
+        headers,
+      });
+
     exporter.attach(auditLedger);
   }
 
@@ -221,9 +318,17 @@ export function startHostedMerchantMcpServer(
   }
   setRefinementStore(store);
 
-  const keyId = process.env[manifest.payment.razorpay_key_id_env] ?? "mock_key";
-  const keySecret = process.env[manifest.payment.razorpay_key_secret_env] ?? "mock_secret";
-  const paymentAdapter = new RazorpayAdapter(keyId, keySecret);
+  const secretKey =
+    process.env[manifest.payment.stripe_secret_key_env] ??
+    process.env.STRIPE_SECRET_KEY ??
+    process.env.STRIPE_API_KEY ??
+    "mock_key";
+  const publishableKey =
+    (manifest.payment.stripe_publishable_key_env ? process.env[manifest.payment.stripe_publishable_key_env] : undefined) ??
+    process.env.STRIPE_PUBLISHABLE_KEY ??
+    process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY;
+  const paymentAdapter = new StripeAdapter(secretKey, publishableKey);
+  paymentAdapter.setCallbackPort(port);
 
   const transports: Record<string, SSEServerTransport> = {};
 
@@ -245,7 +350,7 @@ export function startHostedMerchantMcpServer(
     registerDiscoveryTools(sessionServer, connector, manifest, auditLedger, authGuard);
     registerRefinementTools(sessionServer, connector, auditLedger);
     registerMandateTools(sessionServer, mandateStore, auditLedger);
-    registerAuthTools(sessionServer, sessionStore, authGuard, manifest, oauth2Handler, auditLedger);
+    registerAuthTools(sessionServer, sessionStore, authGuard, manifest, oauth2Handler, auditLedger, recurringTokenStore);
     registerTransactionTools(sessionServer, connector, txnManager, policyEngine, paymentAdapter, auditLedger, mandateStore, authGuard, recurringTokenStore);
 
     const transport = new SSEServerTransport(messageEndpoint, res);
@@ -577,7 +682,7 @@ export function startHostedMerchantMcpServer(
       if (txn.merchant_verified) {
         try {
           // 1. Create order if not already created
-          let orderId = txn.payment?.razorpay_order_id;
+          let orderId = txn.payment?.stripe_payment_intent_id || txn.payment?.stripe_checkout_session_id;
           if (!orderId) {
             const orderResult = await paymentAdapter.createOrder({
               amount: txn.merchant_verified.total,
@@ -595,7 +700,7 @@ export function startHostedMerchantMcpServer(
             );
           }
 
-          // 2. Generate Razorpay Payment Link
+          // 2. Generate Stripe Payment Link
           const linkResult = await paymentAdapter.createPaymentLink({
             amount: txn.merchant_verified.total,
             description: `Manual Payment: ${txn.merchant_verified.title || txn.merchant_verified.sku}`,
@@ -620,11 +725,12 @@ export function startHostedMerchantMcpServer(
 
           // 3. Bind manual payment link and transition to PAYMENT_PENDING
           txnManager.bindPayment(txnId, {
-            provider: "razorpay",
+            provider: "stripe",
             payment_method: "payment_link",
-            razorpay_order_id: orderId,
+            stripe_checkout_session_id: linkResult.payment_link_id,
             payment_link_id: linkResult.payment_link_id,
             payment_link_url: linkResult.short_url,
+            one_time_payment_url: linkResult.short_url,
             payment_status: "pending",
             customer_id: txn.customer_id,
           });

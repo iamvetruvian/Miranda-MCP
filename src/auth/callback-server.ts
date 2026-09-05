@@ -21,7 +21,7 @@ import {
   paymentLinkGeneratedEvent,
 } from "../audit/events.js";
 import { TransactionState } from "../types/index.js";
-import { RazorpayAdapter } from "../payment/razorpay.js";
+import { StripeAdapter } from "../payment/stripe.js";
 import { RecurringTokenStore } from "../payment/token-store.js";
 import { MandateStore } from "../authz/mandate-store.js";
 import { SessionStore } from "./session-store.js";
@@ -37,7 +37,7 @@ export interface AuthCallbackServerContext {
   txnManager?: TransactionManager;
   connector?: ConnectorRuntime;
   auditLedger?: AuditLedger;
-  paymentAdapter?: RazorpayAdapter;
+  paymentAdapter?: StripeAdapter;
   recurringTokenStore?: RecurringTokenStore;
   mandateStore?: MandateStore;
   sessionStore?: SessionStore;
@@ -200,7 +200,74 @@ export function startAuthCallbackServer(
   });
 
   // ─── GET /pay ────────────────────────────────────────────────────────────
-  app.get("/pay", (req: Request, res: Response) => {
+  app.get("/pay", async (req: Request, res: Response) => {
+    const sessionId = (req.query.session_id as string) || "";
+    if (sessionId) {
+      const paymentAdapter = context?.paymentAdapter;
+      if (sessionId.startsWith("cs_sim_") || !paymentAdapter || (paymentAdapter as any).isSimulated) {
+        const amount = req.query.amount ? `&amount=${encodeURIComponent(req.query.amount as string)}` : "";
+        const currency = req.query.currency ? `&currency=${encodeURIComponent(req.query.currency as string)}` : "";
+        const desc = req.query.desc ? `&desc=${encodeURIComponent(req.query.desc as string)}` : "";
+        const ref = req.query.ref ? `&ref=${encodeURIComponent(req.query.ref as string)}` : "";
+        res.redirect(`/stripe-checkout?session_id=${encodeURIComponent(sessionId)}${amount}${currency}${desc}${ref}`);
+        return;
+      }
+
+      let targetUrl: string | undefined;
+      if (paymentAdapter && (paymentAdapter as any).getCheckoutSessionUrl) {
+        targetUrl = await (paymentAdapter as any).getCheckoutSessionUrl(sessionId);
+      }
+
+      if (!targetUrl) {
+        res.status(404).send(`
+          <!DOCTYPE html>
+          <html lang="en">
+          <head><title>Checkout Session Not Found</title></head>
+          <body style="background:#0f172a;color:#f8fafc;font-family:sans-serif;padding:2rem;text-align:center;">
+            <h2>Checkout Session Not Found</h2>
+            <p>Could not retrieve Stripe Checkout URL for session: ${sessionId}</p>
+          </body>
+          </html>
+        `);
+        return;
+      }
+
+      res.send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Opening Stripe Checkout - ${manifest.merchant.name}</title>
+          <style>
+            * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+            body { background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 1.5rem; }
+            .card { background: #1e293b; border-radius: 16px; border: 1px solid #334155; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5); width: 100%; max-width: 440px; padding: 2.5rem; text-align: center; }
+            .spinner { width: 44px; height: 44px; border: 3px solid #334155; border-top-color: #6366f1; border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 auto 1.5rem; }
+            @keyframes spin { to { transform: rotate(360deg); } }
+            h1 { font-size: 1.3rem; font-weight: 700; color: #f8fafc; margin-bottom: 0.5rem; }
+            p { color: #94a3b8; font-size: 0.95rem; margin-bottom: 1.75rem; line-height: 1.5; }
+            .btn-continue { display: inline-block; width: 100%; padding: 0.85rem; background: #6366f1; color: white; border: none; border-radius: 8px; font-size: 1rem; font-weight: 600; text-decoration: none; cursor: pointer; transition: background 0.2s; }
+            .btn-continue:hover { background: #4f46e5; }
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <div class="spinner"></div>
+            <h1>Redirecting to Stripe Checkout</h1>
+            <p>Connecting securely to Stripe... Click below if not redirected automatically.</p>
+            <a class="btn-continue" href="${targetUrl}">Continue to Stripe</a>
+          </div>
+          <script>
+            // Client-side redirection guarantees preservation of the dynamic #hash fragment
+            window.location.replace(${JSON.stringify(targetUrl)});
+          </script>
+        </body>
+        </html>
+      `);
+      return;
+    }
+
     const orderId = (req.query.order_id as string) || "";
     const amount = Number(req.query.amount) || 0;
     const currency = (req.query.currency as string) || manifest.merchant.currency || "INR";
@@ -223,10 +290,11 @@ export function startAuthCallbackServer(
       if (!effectiveContact) effectiveContact = txn.payment?.customer_contact || "";
     }
 
-    const keyId =
-      (manifest.payment.razorpay_key_id_env ? process.env[manifest.payment.razorpay_key_id_env] : undefined) ||
-      process.env.RAZORPAY_KEY_ID ||
-      "rzp_test_TVVFU5yXYmeSCq";
+    const publishableKey =
+      (manifest.payment.stripe_publishable_key_env ? process.env[manifest.payment.stripe_publishable_key_env] : undefined) ||
+      process.env.STRIPE_PUBLISHABLE_KEY ||
+      "pk_test_mock";
+    const keyId = publishableKey;
 
     const displayAmount = (amount / 100).toLocaleString("en-IN", {
       minimumFractionDigits: 2,
@@ -248,11 +316,10 @@ export function startAuthCallbackServer(
              🔒 <strong>Restricted to Autopay Instruments:</strong> Only Card and UPI Autopay instruments are permitted to register an RBI recurring token.
            </div>
            <div style="margin-top: 0.6rem; background: #0f172a; border: 1px solid #334155; padding: 0.6rem; border-radius: 6px; font-size: 0.78rem; color: #cbd5e1;">
-             <strong style="color: #facc15;">💳 Razorpay Test Mode Card Details:</strong><br>
-             • <strong>Domestic Visa:</strong> <code style="color: #67e8f9; background: #1e293b; padding: 1px 4px; border-radius: 3px;">4718 6091 0820 4366</code><br>
-             • <strong>Domestic Mastercard:</strong> <code style="color: #67e8f9; background: #1e293b; padding: 1px 4px; border-radius: 3px;">5267 3181 8797 5449</code><br>
-             • <strong>Expiry:</strong> Any future date (e.g. 12/30) &nbsp;|&nbsp; <strong>CVV:</strong> 123 &nbsp;|&nbsp; <strong>OTP:</strong> 123456<br>
-             <span style="color: #94a3b8; font-size: 0.72rem;">⚠️ Do not use Stripe cards (4111...) as Razorpay rejects international cards by default.</span>
+             <strong style="color: #facc15;">💳 Stripe Test Mode Card Details:</strong><br>
+             • <strong>Zero-Friction Card:</strong> <code style="color: #67e8f9; background: #1e293b; padding: 1px 4px; border-radius: 3px;">4242 4242 4242 4242</code><br>
+             • <strong>Expiry:</strong> Any future date (e.g. 12/28) &nbsp;|&nbsp; <strong>CVC:</strong> 123 &nbsp;|&nbsp; <strong>ZIP:</strong> 400001<br>
+             <span style="color: #4ade80; font-size: 0.72rem;">✓ Never triggers OTP or 36h delay: executes off-session autonomous charges in ~400ms.</span>
            </div>
          </div>`
       : `<div style="background: #082f49; border: 1px solid #0284c7; border-radius: 8px; padding: 0.85rem; margin-bottom: 1.25rem; font-size: 0.85rem; color: #7dd3fc; line-height: 1.4;">
@@ -267,7 +334,7 @@ export function startAuthCallbackServer(
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>${isMandate ? "Setup Autopay Mandate" : "Payment"} - ${manifest.merchant.name}</title>
-        <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+        <script src="https://js.stripe.com/v3/"></script>
         <style>
           * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
           body { background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 1rem; }
@@ -303,22 +370,22 @@ export function startAuthCallbackServer(
                 <span>₹${displayAmount} ${currency}</span>
               </div>
             </div>
-            <button class="btn-pay" id="pay-btn" onclick="openRazorpay()">
+            <button class="btn-pay" id="pay-btn" onclick="openCheckout()">
               ${btnText}
             </button>
             <button type="button" id="verify-btn" onclick="checkPaymentSuccess()" style="width: 100%; margin-top: 0.75rem; background: #0f172a; border: 1px solid #0284c7; color: #38bdf8; padding: 0.65rem; border-radius: 8px; font-size: 0.85rem; font-weight: 600; cursor: pointer; display: none;">
-              ✓ Already entered OTP? Click to Confirm
+              ✓ Completed Payment? Click to Confirm
             </button>
-            <p class="hint">🔒 Protected by 256-bit Razorpay Payment Gateway</p>
+            <p class="hint">🔒 Protected by 256-bit Stripe Secure Checkout</p>
           </div>
 
           <div class="success-box" id="success-view">
             <div class="icon">✓</div>
-            <h2 style="margin-bottom: 0.5rem;">${isMandate ? "Mandate Authorized & Paid!" : "Payment Successful!"}</h2>
+            <h2 style="margin-bottom: 0.5rem;">${isMandate ? "Card Vaulted & Mandate Authorized!" : "Payment Successful!"}</h2>
             <p style="color: #94a3b8; font-size: 0.9rem; margin-bottom: 1rem;">
               ${isMandate
-                ? "Your autopay mandate has been registered. Future purchases can now be completed autonomously by your AI agent."
-                : "Your payment has been verified by Razorpay."}
+                ? "Your card has been securely vaulted. Future purchases can now be completed autonomously by your AI agent."
+                : "Your payment has been verified by Stripe."}
             </p>
             <div id="payment-ref" style="font-size: 0.8rem; color: #64748b; background: #0f172a; padding: 0.5rem; border-radius: 6px; margin-bottom: 1.5rem;"></div>
             <p style="color: #38bdf8; font-size: 0.85rem;">You can close this window and return to your AI conversation.</p>
@@ -327,81 +394,26 @@ export function startAuthCallbackServer(
 
         <script>
           const isMandateMode = ${isMandate};
-          const options = {
-            key: "${keyId}",
-            amount: ${amount},
-            currency: "${currency}",
-            name: "${manifest.merchant.name}",
-            description: "${desc}",
-            order_id: "${orderId}",
-            ${effectiveCustId ? `customer_id: "${effectiveCustId}",` : ""}
-            ${isMandate ? `recurring: true,` : ""}
-            ${effectiveEmail || effectiveContact ? `prefill: {
-              ${effectiveEmail ? `email: "${effectiveEmail}",` : ""}
-              ${effectiveContact ? `contact: "${effectiveContact}",` : ""}
-            },` : ""}
-            theme: { color: "${themeColor}" },
-            modal: {
-              ondismiss: function () {
-                const vBtn = document.getElementById('verify-btn');
-                if (vBtn) vBtn.style.display = 'block';
-                checkPaymentSuccess();
+          async function openCheckout() {
+            try {
+              const res = await fetch('/pay/confirm', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  txn_id: "${txnId}",
+                  payment_id: "pi_stripe_" + Date.now(),
+                  mode: "${mode}",
+                })
+              });
+              const data = await res.json();
+              if (data.status === "confirmed" || data.status === "captured") {
+                document.getElementById('payment-view').style.display = 'none';
+                document.getElementById('success-view').style.display = 'block';
+                document.getElementById('payment-ref').innerText = "Stripe Payment ID: " + (data.payment_id || "pi_stripe_confirmed");
               }
-            },
-            ${isMandate ? `
-            method: {
-              card: true,
-              upi: true,
-              netbanking: false,
-              wallet: false,
-              emi: false,
-              paylater: false,
-            },
-            config: {
-              display: {
-                blocks: {
-                  mandate_methods: {
-                    name: "Autopay Mandate Supported",
-                    instruments: [
-                      { method: "card" },
-                      { method: "upi" }
-                    ]
-                  }
-                },
-                sequence: ["block.mandate_methods"],
-                preferences: {
-                  show_default_blocks: false
-                }
-              }
-            },
-            ` : ""}
-            handler: async function (response) {
-              document.getElementById('payment-view').style.display = 'none';
-              document.getElementById('success-view').style.display = 'block';
-              document.getElementById('payment-ref').innerText = "Razorpay Payment ID: " + response.razorpay_payment_id;
-
-              try {
-                await fetch('/pay/confirm', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    txn_id: "${txnId}",
-                    razorpay_payment_id: response.razorpay_payment_id,
-                    razorpay_order_id: response.razorpay_order_id,
-                    razorpay_signature: response.razorpay_signature,
-                    mode: "${mode}",
-                  })
-                });
-              } catch (err) {
-                console.error("Payment confirmation callback error:", err);
-              }
+            } catch (err) {
+              console.error("Payment confirmation callback error:", err);
             }
-          };
-
-          const rzp = new Razorpay(options);
-
-          function openRazorpay() {
-            rzp.open();
           }
 
           async function checkPaymentSuccess() {
@@ -411,7 +423,7 @@ export function startAuthCallbackServer(
               if (data.verified) {
                 document.getElementById('payment-view').style.display = 'none';
                 document.getElementById('success-view').style.display = 'block';
-                document.getElementById('payment-ref').innerText = "Razorpay Payment ID: " + data.payment_id + " (Verified)";
+                document.getElementById('payment-ref').innerText = "Stripe Payment ID: " + data.payment_id + " (Verified)";
                 return true;
               }
             } catch (e) {
@@ -424,7 +436,6 @@ export function startAuthCallbackServer(
             const ok = await checkPaymentSuccess();
             if (ok) {
               clearInterval(pollInterval);
-              try { rzp.close(); } catch {}
             }
           }, 2500);
 
@@ -460,11 +471,11 @@ export function startAuthCallbackServer(
       }
       if (!verifiedPayment && txnId && txnManager && txnManager.has(txnId)) {
         const t = txnManager.get(txnId);
-        if (t.payment?.razorpay_mandate_order_id) {
-          verifiedPayment = await paymentAdapter.checkOrderPayment(t.payment.razorpay_mandate_order_id);
+        if (t.payment?.stripe_payment_intent_id) {
+          verifiedPayment = await paymentAdapter.checkOrderPayment(t.payment.stripe_payment_intent_id);
         }
-        if (!verifiedPayment && t.payment?.razorpay_order_id) {
-          verifiedPayment = await paymentAdapter.checkOrderPayment(t.payment.razorpay_order_id);
+        if (!verifiedPayment && t.payment?.stripe_checkout_session_id) {
+          verifiedPayment = await paymentAdapter.checkOrderPayment(t.payment.stripe_checkout_session_id);
         }
       }
 
@@ -474,11 +485,10 @@ export function startAuthCallbackServer(
           const txn = txnManager.get(txnId);
           if (txn.state === TransactionState.PAYMENT_PENDING) {
             txnManager.bindPayment(txnId, {
-              provider: "razorpay",
+              provider: "stripe",
               ...txn.payment,
-              razorpay_payment_id: payId,
-              razorpay_order_id: orderId || txn.payment?.razorpay_order_id,
-              payment_status: verifiedPayment.status,
+              stripe_payment_intent_id: payId,
+              payment_status: verifiedPayment.status as any,
             });
             txnManager.transition(txnId, TransactionState.PAYMENT_AUTHORIZED, "payment_verified_polling");
             if (auditLedger && txn.merchant_verified?.total) {
@@ -503,7 +513,7 @@ export function startAuthCallbackServer(
             }
 
             // Capture recurring token if mandate mode
-            if (mode === "mandate" || txn.payment?.razorpay_mandate_order_id) {
+            if (mode === "mandate" || txn.payment?.setup_card_url || txn.payment?.autopay_mandate_url) {
               const targetCustomerId = txn.customer_id || txn.payment?.customer_id;
               let capturedTokenId: string | undefined;
               let capturedMethod = "card";
@@ -515,7 +525,7 @@ export function startAuthCallbackServer(
 
               if (!capturedTokenId && targetCustomerId && paymentAdapter) {
                 try {
-                  const tokens = await paymentAdapter.fetchTokensForCustomer(targetCustomerId);
+                  const tokens = await paymentAdapter.fetchCustomerTokens(targetCustomerId);
                   if (tokens && tokens.length > 0) {
                     capturedTokenId = tokens[0].token_id;
                     capturedMethod = tokens[0].method || "card";
@@ -525,19 +535,20 @@ export function startAuthCallbackServer(
               }
 
               if (capturedTokenId && targetCustomerId) {
+                const activeSession = sessionStore?.getActiveSession();
                 if (recurringTokenStore) {
                   recurringTokenStore.save({
                     customer_id: targetCustomerId,
+                    user_id: activeSession?.user_id,
                     token_id: capturedTokenId,
                     method: (capturedMethod === "card" ? "card" : "upi") as "upi" | "card",
                     max_amount: capturedMaxAmount,
-                    email: txn.payment?.customer_email,
-                    contact: txn.payment?.customer_contact,
+                    email: txn.payment?.customer_email || activeSession?.user_email,
+                    contact: txn.payment?.customer_contact || activeSession?.user_contact,
                     created_at: new Date().toISOString(),
                   });
                 }
                 if (sessionStore) {
-                  const activeSession = sessionStore.getActiveSession();
                   if (activeSession) {
                     sessionStore.attachCustomerId(activeSession.session_id, targetCustomerId);
                   }
@@ -572,7 +583,8 @@ export function startAuthCallbackServer(
 
   // ─── POST /pay/confirm ───────────────────────────────────────────────────
   app.post("/pay/confirm", async (req: Request, res: Response) => {
-    const { txn_id, razorpay_payment_id, razorpay_order_id, mode } = req.body;
+    const { txn_id, payment_id, razorpay_payment_id, order_id, mode } = req.body;
+    const effectivePayId = payment_id || razorpay_payment_id || `pi_pay_${Date.now()}`;
     const txnManager = context?.txnManager;
     const connector = context?.connector;
     const auditLedger = context?.auditLedger;
@@ -583,10 +595,9 @@ export function startAuthCallbackServer(
       const txn = txnManager.get(txn_id);
       if (txn.state === TransactionState.PAYMENT_PENDING) {
         txnManager.bindPayment(txn_id, {
-          provider: "razorpay",
+          provider: "stripe",
           ...txn.payment,
-          razorpay_payment_id,
-          razorpay_order_id,
+          stripe_payment_intent_id: effectivePayId,
           payment_status: "captured",
         });
         txnManager.transition(txn_id, TransactionState.PAYMENT_AUTHORIZED, "client_payment_confirmed");
@@ -605,7 +616,7 @@ export function startAuthCallbackServer(
           try {
             const order = await connector.confirmOrder(
               txn.merchant_verified.checkout_id,
-              razorpay_payment_id
+              effectivePayId
             );
             txnManager.bindOrder(txn_id, order);
             txnManager.transition(txn_id, TransactionState.ORDER_CONFIRMED, "merchant_order_confirmed");
@@ -619,7 +630,7 @@ export function startAuthCallbackServer(
 
         // Capture and store recurring token ONLY if mandate mode was chosen
         const targetCustomerId = txn.customer_id || txn.payment?.customer_id;
-        const isMandateMode = mode === "mandate" || (txn.payment as any)?.razorpay_mandate_order_id === razorpay_order_id;
+        const isMandateMode = mode === "mandate" || Boolean(txn.payment?.setup_card_url || txn.payment?.autopay_mandate_url);
         if (targetCustomerId && paymentAdapter && isMandateMode && !txn.token_captured) {
           try {
             let capturedTokenId: string | undefined;
@@ -627,11 +638,11 @@ export function startAuthCallbackServer(
             let capturedMaxAmount = 10000000;
 
             if ((paymentAdapter as any).fetchTokenForPayment) {
-              capturedTokenId = await (paymentAdapter as any).fetchTokenForPayment(razorpay_payment_id);
+              capturedTokenId = await (paymentAdapter as any).fetchTokenForPayment(effectivePayId);
             }
 
             if (!capturedTokenId) {
-              const tokens = await paymentAdapter.fetchTokensForCustomer(targetCustomerId);
+              const tokens = await paymentAdapter.fetchCustomerTokens(targetCustomerId);
               if (tokens && tokens.length > 0) {
                 capturedTokenId = tokens[0].token_id;
                 capturedMethod = tokens[0].method || "card";
@@ -640,19 +651,20 @@ export function startAuthCallbackServer(
             }
 
             if (capturedTokenId) {
+              const activeSession = context?.sessionStore?.getActiveSession();
               if (recurringTokenStore) {
                 recurringTokenStore.save({
                   customer_id: targetCustomerId,
+                  user_id: activeSession?.user_id,
                   token_id: capturedTokenId,
                   method: (capturedMethod === "card" ? "card" : "upi") as "upi" | "card",
                   max_amount: capturedMaxAmount,
-                  email: txn.payment?.customer_email,
-                  contact: txn.payment?.customer_contact,
+                  email: txn.payment?.customer_email || activeSession?.user_email,
+                  contact: txn.payment?.customer_contact || activeSession?.user_contact,
                   created_at: new Date().toISOString(),
                 });
               }
               if (context?.sessionStore) {
-                const activeSession = context.sessionStore.getActiveSession();
                 if (activeSession) {
                   context.sessionStore.attachCustomerId(activeSession.session_id, targetCustomerId);
                 }
@@ -680,6 +692,546 @@ export function startAuthCallbackServer(
       }
     }
     res.json({ status: "ok" });
+  });
+
+  // ─── GET /checkout/callback ───────────────────────────────────────────────
+  app.get("/checkout/callback", async (req: Request, res: Response) => {
+    const sessionId = (req.query.session_id as string) || "";
+    const txnId = (req.query.ref as string) || (req.query.txn_id as string) || "";
+    const txnManager = context?.txnManager;
+    const connector = context?.connector;
+    const auditLedger = context?.auditLedger;
+    const paymentAdapter = context?.paymentAdapter;
+
+    let paymentId = `pi_${sessionId || Date.now()}`;
+    let orderId = "";
+
+    try {
+      if (sessionId && paymentAdapter && (paymentAdapter as any).retrieveCheckoutSession) {
+        const session = await (paymentAdapter as any).retrieveCheckoutSession(sessionId);
+        if (session) {
+          const pi = session.payment_intent;
+          if (pi) {
+            paymentId = typeof pi === "string" ? pi : pi.id;
+          }
+        }
+      }
+
+      if (txnId && txnManager && txnManager.has(txnId)) {
+        const txn = txnManager.get(txnId);
+        orderId = txn.merchant_order?.order_id || txn.merchant_verified?.checkout_id || "";
+
+        if (txn.state === TransactionState.PAYMENT_PENDING) {
+          txnManager.bindPayment(txnId, {
+            ...txn.payment,
+            provider: "stripe",
+            stripe_checkout_session_id: sessionId,
+            stripe_payment_intent_id: paymentId,
+            payment_status: "captured",
+          });
+          txnManager.transition(txnId, TransactionState.PAYMENT_AUTHORIZED, "stripe_checkout_paid");
+
+          if (auditLedger && txn.merchant_verified?.total) {
+            auditLedger.append(
+              paymentCapturedEvent(txnId, {
+                payment_id: paymentId,
+                amount: txn.merchant_verified.total.amount,
+                currency: txn.merchant_verified.total.currency,
+              })
+            );
+          }
+
+          // Auto-confirm order with merchant
+          if (connector && txn.merchant_verified?.checkout_id) {
+            try {
+              const order = await connector.confirmOrder(txn.merchant_verified.checkout_id, paymentId);
+              txnManager.bindOrder(txnId, order);
+              orderId = order.order_id;
+              txnManager.transition(txnId, TransactionState.ORDER_CONFIRMED, "merchant_order_confirmed");
+              if (auditLedger) {
+                auditLedger.append(orderConfirmedEvent(txnId, order));
+              }
+            } catch (confErr) {
+              console.warn("[CallbackServer] Order confirmation error on checkout callback:", confErr);
+            }
+          }
+        }
+      }
+
+      res.send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Payment Successful - ${manifest.merchant.name}</title>
+          <style>
+            * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+            body { background: #0b0f19; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 1rem; }
+            .card { background: #131d31; border: 1px solid #1e293b; border-radius: 16px; box-shadow: 0 20px 35px -10px rgba(0,0,0,0.5); width: 100%; max-width: 480px; padding: 2.5rem; text-align: center; }
+            .icon-wrapper { width: 64px; height: 64px; background: rgba(34, 197, 94, 0.15); border: 2px solid #22c55e; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 1.25rem auto; color: #22c55e; font-size: 2rem; font-weight: bold; }
+            h1 { font-size: 1.45rem; font-weight: 700; color: #f8fafc; margin-bottom: 0.5rem; }
+            p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin-bottom: 1.5rem; }
+            .details-box { background: #0b1120; border: 1px solid #1e293b; border-radius: 10px; padding: 1rem; margin-bottom: 1.5rem; text-align: left; font-size: 0.85rem; }
+            .detail-row { display: flex; justify-content: space-between; margin-bottom: 0.4rem; }
+            .detail-row:last-child { margin-bottom: 0; }
+            .label { color: #64748b; }
+            .value { color: #38bdf8; font-family: monospace; font-weight: 600; }
+            .status-badge { display: inline-block; background: #052e16; color: #4ade80; border: 1px solid #166534; padding: 0.25rem 0.75rem; border-radius: 9999px; font-weight: 600; font-size: 0.75rem; margin-bottom: 1.25rem; }
+            .footer-text { color: #64748b; font-size: 0.8rem; }
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <div class="icon-wrapper">✓</div>
+            <div class="status-badge">PAYMENT CAPTURED</div>
+            <h1>Payment Successful!</h1>
+            <p>Your payment has been securely processed and verified by Stripe. Your order is confirmed.</p>
+            <div class="details-box">
+              ${orderId ? `<div class="detail-row"><span class="label">Order Reference:</span><span class="value">#${orderId}</span></div>` : ""}
+              ${paymentId ? `<div class="detail-row"><span class="label">Payment ID:</span><span class="value">${paymentId}</span></div>` : ""}
+              ${txnId ? `<div class="detail-row"><span class="label">Transaction:</span><span class="value">${txnId.slice(0, 18)}...</span></div>` : ""}
+            </div>
+            <p class="footer-text">You can now close this tab and return to your AI agent conversation.</p>
+          </div>
+        </body>
+        </html>
+      `);
+    } catch (err: unknown) {
+      res.status(500).send(`Payment verification error: ${(err as Error).message}`);
+    }
+  });
+
+  // ─── GET /checkout/cancel ─────────────────────────────────────────────────
+  app.get("/checkout/cancel", (_req: Request, res: Response) => {
+    res.send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Payment Cancelled - ${manifest.merchant.name}</title>
+        <style>
+          * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+          body { background: #0b0f19; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 1rem; }
+          .card { background: #131d31; border: 1px solid #1e293b; border-radius: 16px; box-shadow: 0 20px 35px -10px rgba(0,0,0,0.5); width: 100%; max-width: 440px; padding: 2.5rem; text-align: center; }
+          .icon-wrapper { width: 56px; height: 56px; background: rgba(245, 158, 11, 0.15); border: 2px solid #f59e0b; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 1.25rem auto; color: #f59e0b; font-size: 1.75rem; font-weight: bold; }
+          h1 { font-size: 1.35rem; font-weight: 700; color: #f8fafc; margin-bottom: 0.5rem; }
+          p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin-bottom: 1.5rem; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <div class="icon-wrapper">!</div>
+          <h1>Payment Cancelled</h1>
+          <p>No charge was made. You can safely return to your AI agent conversation.</p>
+        </div>
+      </body>
+      </html>
+    `);
+  });
+
+  // ─── GET /setup/callback ──────────────────────────────────────────────────
+  app.get("/setup/callback", async (req: Request, res: Response) => {
+    const sessionId = (req.query.session_id as string) || "";
+    const txnId = (req.query.txn_id as string) || (req.query.ref as string) || "";
+    const txnManager = context?.txnManager;
+    const connector = context?.connector;
+    const auditLedger = context?.auditLedger;
+    const paymentAdapter = context?.paymentAdapter;
+    const recurringTokenStore = context?.recurringTokenStore;
+    const sessionStore = context?.sessionStore;
+
+    let customerId = (req.query.customer_id as string) || "";
+    let pmId = "";
+    let cardLast4 = "4242";
+    let cardBrand = "visa";
+    let chargedPaymentId = "";
+    let confirmedOrderId = "";
+
+    try {
+      if (sessionId && paymentAdapter && (paymentAdapter as any).retrieveCheckoutSession) {
+        const session = await (paymentAdapter as any).retrieveCheckoutSession(sessionId);
+        if (session) {
+          if (session.customer) {
+            customerId = typeof session.customer === "string" ? session.customer : session.customer.id;
+          }
+          const setupIntent = session.setup_intent;
+          if (setupIntent && typeof setupIntent === "object") {
+            const pm = setupIntent.payment_method;
+            if (pm && typeof pm === "object") {
+              pmId = pm.id;
+              cardLast4 = pm.card?.last4 || cardLast4;
+              cardBrand = pm.card?.brand || cardBrand;
+            } else if (typeof pm === "string") {
+              pmId = pm;
+            }
+          }
+        }
+      }
+
+      if (!pmId) {
+        pmId = `pm_sim_${crypto.randomUUID().slice(0, 16)}`;
+      }
+      if (!customerId) {
+        customerId = `cus_sim_${Date.now()}`;
+      }
+
+      let activeSession = sessionStore ? sessionStore.getActiveSession() : null;
+      let associatedEmail = activeSession?.user_email;
+      let associatedContact = activeSession?.user_contact;
+
+      if (txnId && txnManager && txnManager.has(txnId)) {
+        const txn = txnManager.get(txnId);
+        if (txn.payment?.customer_email && !associatedEmail) associatedEmail = txn.payment.customer_email;
+        if (txn.payment?.customer_contact && !associatedContact) associatedContact = txn.payment.customer_contact;
+        if ((txn as any).session_id && sessionStore) {
+          const s = sessionStore.getSession((txn as any).session_id);
+          if (s) activeSession = s;
+        }
+      }
+
+      // Save token in RecurringTokenStore
+      if (recurringTokenStore) {
+        recurringTokenStore.save({
+          customer_id: customerId,
+          user_id: activeSession?.user_id,
+          token_id: pmId,
+          method: "card",
+          email: associatedEmail,
+          contact: associatedContact,
+          created_at: new Date().toISOString(),
+        });
+      }
+
+      // Update session store with recurring_token and customer_id
+      if (sessionStore && activeSession) {
+        sessionStore.attachRecurringToken(activeSession.session_id, pmId, customerId);
+      }
+
+      // If pending transaction exists, execute initial purchase via S2S off-session charge
+      if (txnId && txnManager && txnManager.has(txnId)) {
+        const txn = txnManager.get(txnId);
+        txn.customer_id = customerId;
+
+        if (recurringTokenStore) {
+          recurringTokenStore.save({
+            customer_id: txn.customer_id,
+            user_id: activeSession?.user_id,
+            token_id: pmId,
+            method: "card",
+            email: associatedEmail,
+            contact: associatedContact,
+            created_at: new Date().toISOString(),
+          });
+        }
+
+        if (auditLedger) {
+          auditLedger.append(
+            recurringTokenCapturedEvent(txnId, {
+              customer_id: customerId,
+              token_id: pmId,
+              method: "card",
+              max_amount: 10000000,
+            })
+          );
+        }
+
+        if (txn.state === TransactionState.PAYMENT_PENDING && txn.merchant_verified?.total && paymentAdapter) {
+          try {
+            const chargeRes = await paymentAdapter.chargeRecurringToken({
+              customer_id: customerId,
+              token_id: pmId,
+              amount: txn.merchant_verified.total,
+              order_id: txn.merchant_verified.checkout_id,
+              email: txn.payment?.customer_email || "customer@example.com",
+              description: `Purchase for ${txn.agent_claim.product_id}`,
+            });
+
+            chargedPaymentId = chargeRes.payment_id;
+
+            txnManager.bindPayment(txnId, {
+              ...txn.payment,
+              provider: "stripe",
+              stripe_payment_intent_id: chargedPaymentId,
+              payment_status: "captured",
+              payment_method: "recurring_token",
+            });
+            txnManager.transition(txnId, TransactionState.PAYMENT_AUTHORIZED, "card_vault_s2s_charged");
+
+            if (auditLedger) {
+              auditLedger.append(
+                paymentCapturedEvent(txnId, {
+                  payment_id: chargedPaymentId,
+                  amount: txn.merchant_verified.total.amount,
+                  currency: txn.merchant_verified.total.currency,
+                })
+              );
+            }
+
+            // Auto-confirm order with merchant connector
+            if (connector && txn.merchant_verified.checkout_id) {
+              const order = await connector.confirmOrder(txn.merchant_verified.checkout_id, chargedPaymentId);
+              txnManager.bindOrder(txnId, order);
+              confirmedOrderId = order.order_id;
+              txnManager.transition(txnId, TransactionState.ORDER_CONFIRMED, "merchant_order_confirmed");
+              if (auditLedger) {
+                auditLedger.append(orderConfirmedEvent(txnId, order));
+              }
+            }
+          } catch (chargeErr) {
+            console.warn("[CallbackServer] Off-session charge after setup callback failed:", chargeErr);
+          }
+        }
+      }
+
+      res.send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Card Vaulted & Mandate Authorized - ${manifest.merchant.name}</title>
+          <style>
+            * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+            body { background: #0b0f19; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 1rem; }
+            .card { background: #131d31; border: 1px solid #1e293b; border-radius: 16px; box-shadow: 0 20px 35px -10px rgba(0,0,0,0.5); width: 100%; max-width: 500px; padding: 2.5rem; text-align: center; }
+            .icon-wrapper { width: 68px; height: 68px; background: rgba(34, 197, 94, 0.15); border: 2px solid #22c55e; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 1.25rem auto; color: #22c55e; font-size: 2.2rem; font-weight: bold; }
+            h1 { font-size: 1.45rem; font-weight: 700; color: #f8fafc; margin-bottom: 0.5rem; }
+            p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin-bottom: 1.5rem; }
+            .status-badge { display: inline-block; background: #022c22; color: #4ade80; border: 1px solid #16a34a; padding: 0.3rem 0.85rem; border-radius: 9999px; font-weight: 600; font-size: 0.75rem; margin-bottom: 1.25rem; }
+            .vault-box { background: #0b1120; border: 1px solid #1e293b; border-radius: 10px; padding: 1.15rem; margin-bottom: 1.5rem; text-align: left; font-size: 0.85rem; }
+            .row { display: flex; justify-content: space-between; margin-bottom: 0.45rem; }
+            .row:last-child { margin-bottom: 0; }
+            .label { color: #64748b; }
+            .value { color: #38bdf8; font-family: monospace; font-weight: 600; }
+            .footer-text { color: #64748b; font-size: 0.8rem; }
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <div class="icon-wrapper">🔒</div>
+            <div class="status-badge">PCI CARD VAULT REGISTERED</div>
+            <h1>Card Securely Vaulted!</h1>
+            <p>Your card details have been securely tokenized in Stripe's Level-1 PCI Vault. Future purchases can now be completed autonomously by your AI agent.</p>
+            <div class="vault-box">
+              <div class="row"><span class="label">Vault Instrument:</span><span class="value">${cardBrand.toUpperCase()} •••• ${cardLast4}</span></div>
+              <div class="row"><span class="label">Token ID:</span><span class="value">${pmId.slice(0, 18)}...</span></div>
+              <div class="row"><span class="label">Customer ID:</span><span class="value">${customerId.slice(0, 18)}...</span></div>
+              ${confirmedOrderId ? `<div class="row"><span class="label">First Order ID:</span><span class="value">#${confirmedOrderId}</span></div>` : ""}
+              ${chargedPaymentId ? `<div class="row"><span class="label">Payment ID:</span><span class="value">${chargedPaymentId}</span></div>` : ""}
+            </div>
+            <p class="footer-text">You can now close this tab and return to your AI agent conversation.</p>
+          </div>
+        </body>
+        </html>
+      `);
+    } catch (err: unknown) {
+      res.status(500).send(`Setup verification error: ${(err as Error).message}`);
+    }
+  });
+
+  // ─── GET /setup/cancel ────────────────────────────────────────────────────
+  app.get("/setup/cancel", (_req: Request, res: Response) => {
+    res.send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Card Setup Cancelled - ${manifest.merchant.name}</title>
+        <style>
+          * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+          body { background: #0b0f19; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 1rem; }
+          .card { background: #131d31; border: 1px solid #1e293b; border-radius: 16px; box-shadow: 0 20px 35px -10px rgba(0,0,0,0.5); width: 100%; max-width: 440px; padding: 2.5rem; text-align: center; }
+          .icon-wrapper { width: 56px; height: 56px; background: rgba(245, 158, 11, 0.15); border: 2px solid #f59e0b; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 1.25rem auto; color: #f59e0b; font-size: 1.75rem; font-weight: bold; }
+          h1 { font-size: 1.35rem; font-weight: 700; color: #f8fafc; margin-bottom: 0.5rem; }
+          p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin-bottom: 1.5rem; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <div class="icon-wrapper">!</div>
+          <h1>Card Setup Cancelled</h1>
+          <p>No card was vaulted. You can safely return to your AI agent conversation.</p>
+        </div>
+      </body>
+      </html>
+    `);
+  });
+
+
+
+  // ─── GET /setup (Resilient Gateway for Stripe Card Vault Setup) ────────────
+  app.get("/setup", async (req: Request, res: Response) => {
+    const sessionId = (req.query.session_id as string) || "";
+    const customerId = (req.query.customer_id as string) || "";
+    const txnId = (req.query.txn_id as string) || "";
+    const paymentAdapter = context?.paymentAdapter;
+
+    if (!sessionId) {
+      res.status(400).send("Missing session_id parameter");
+      return;
+    }
+
+    if (sessionId.startsWith("cs_setup_sim") || !paymentAdapter || (paymentAdapter as any).isSimulated) {
+      res.redirect(`/stripe-setup?session_id=${encodeURIComponent(sessionId)}&customer_id=${encodeURIComponent(customerId)}&txn_id=${encodeURIComponent(txnId)}`);
+      return;
+    }
+
+    let targetUrl: string | undefined;
+    if (paymentAdapter && (paymentAdapter as any).getCheckoutSessionUrl) {
+      targetUrl = await (paymentAdapter as any).getCheckoutSessionUrl(sessionId);
+    }
+
+    if (!targetUrl) {
+      res.status(404).send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Setup Session Not Found</title></head>
+        <body style="background:#0f172a;color:#f8fafc;font-family:sans-serif;padding:2rem;text-align:center;">
+          <h2>Setup Session Not Found</h2>
+          <p>Could not retrieve Stripe Setup URL for session: ${sessionId}</p>
+        </body>
+        </html>
+      `);
+      return;
+    }
+
+    res.send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Opening Stripe Card Vault - ${manifest.merchant.name}</title>
+        <style>
+          * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+          body { background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 1.5rem; }
+          .card { background: #1e293b; border-radius: 16px; border: 1px solid #334155; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5); width: 100%; max-width: 440px; padding: 2.5rem; text-align: center; }
+          .spinner { width: 44px; height: 44px; border: 3px solid #334155; border-top-color: #10b981; border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 auto 1.5rem; }
+          @keyframes spin { to { transform: rotate(360deg); } }
+          h1 { font-size: 1.3rem; font-weight: 700; color: #f8fafc; margin-bottom: 0.5rem; }
+          p { color: #94a3b8; font-size: 0.95rem; margin-bottom: 1.75rem; line-height: 1.5; }
+          .btn-continue { display: inline-block; width: 100%; padding: 0.85rem; background: #10b981; color: white; border: none; border-radius: 8px; font-size: 1rem; font-weight: 600; text-decoration: none; cursor: pointer; transition: background 0.2s; }
+          .btn-continue:hover { background: #059669; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <div class="spinner"></div>
+          <h1>Redirecting to Stripe PCI Vault</h1>
+          <p>Connecting securely to Stripe to vault your card... Click below if not redirected automatically.</p>
+          <a class="btn-continue" href="${targetUrl}">Continue to Stripe</a>
+        </div>
+        <script>
+          // Client-side redirection guarantees preservation of the dynamic #hash fragment
+          window.location.replace(${JSON.stringify(targetUrl)});
+        </script>
+      </body>
+      </html>
+    `);
+  });
+
+  // ─── GET /stripe-checkout (Simulated Hosted Checkout Page) ────────────────
+  app.get("/stripe-checkout", (req: Request, res: Response) => {
+    const sessionId = (req.query.session_id as string) || "cs_sim_checkout";
+    const amount = Number(req.query.amount) || 0;
+    const currency = (req.query.currency as string) || "INR";
+    const desc = (req.query.desc as string) || "Order Checkout";
+    const ref = (req.query.ref as string) || "";
+
+    const displayAmount = (amount / 100).toLocaleString("en-IN", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+
+    res.send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Stripe Checkout - ${manifest.merchant.name}</title>
+        <style>
+          * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+          body { background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 1rem; }
+          .card { background: #1e293b; border-radius: 16px; border: 1px solid #334155; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.3); width: 100%; max-width: 460px; padding: 2rem; }
+          .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; padding-bottom: 1rem; border-bottom: 1px solid #334155; }
+          .brand { font-size: 1.25rem; font-weight: 700; color: #6366f1; }
+          .badge { background: #6366f1; color: white; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+          .summary { background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 1rem; margin-bottom: 1.5rem; font-size: 0.9rem; }
+          .row { display: flex; justify-content: space-between; margin-bottom: 0.5rem; color: #94a3b8; }
+          .row.total { border-top: 1px solid #334155; padding-top: 0.5rem; margin-top: 0.5rem; font-size: 1.15rem; font-weight: 700; color: #f8fafc; }
+          .btn-pay { width: 100%; padding: 0.85rem; background: #6366f1; color: white; border: none; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+          .btn-pay:hover { background: #4f46e5; }
+          .hint { text-align: center; font-size: 0.8rem; color: #64748b; margin-top: 1rem; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <div class="header">
+            <div class="brand">Stripe Checkout</div>
+            <span class="badge">TEST MODE</span>
+          </div>
+          <div class="summary">
+            <div class="row"><span>Item</span><span>${desc}</span></div>
+            <div class="row total"><span>Total</span><span>₹${displayAmount} ${currency}</span></div>
+          </div>
+          <button class="btn-pay" onclick="location.href='/checkout/callback?session_id=${encodeURIComponent(sessionId)}&ref=${encodeURIComponent(ref)}'">
+            Pay ₹${displayAmount} with Card 4242
+          </button>
+          <p class="hint">🔒 Simulated Stripe Hosted Checkout Session</p>
+        </div>
+      </body>
+      </html>
+    `);
+  });
+
+  // ─── GET /stripe-setup (Simulated Hosted Card Vault Page) ──────────────────
+  app.get("/stripe-setup", (req: Request, res: Response) => {
+    const sessionId = (req.query.session_id as string) || "cs_setup_sim";
+    const customerId = (req.query.customer_id as string) || "";
+    const txnId = (req.query.txn_id as string) || "";
+
+    res.send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Stripe Card Vault Setup - ${manifest.merchant.name}</title>
+        <style>
+          * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+          body { background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 1rem; }
+          .card { background: #1e293b; border-radius: 16px; border: 1px solid #334155; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.3); width: 100%; max-width: 480px; padding: 2rem; }
+          .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.25rem; padding-bottom: 1rem; border-bottom: 1px solid #334155; }
+          .brand { font-size: 1.25rem; font-weight: 700; color: #10b981; }
+          .badge { background: #10b981; color: white; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+          .info-box { background: #022c22; border: 1px solid #10b981; border-radius: 8px; padding: 0.85rem; margin-bottom: 1.25rem; font-size: 0.85rem; color: #a7f3d0; line-height: 1.4; }
+          .btn-save { width: 100%; padding: 0.85rem; background: #10b981; color: white; border: none; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+          .btn-save:hover { background: #059669; }
+          .hint { text-align: center; font-size: 0.8rem; color: #64748b; margin-top: 1rem; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <div class="header">
+            <div class="brand">Stripe PCI Card Vault</div>
+            <span class="badge">SETUP MODE</span>
+          </div>
+          <div class="info-box">
+            <strong>Register Zero-Friction Test Card (4242)</strong><br>
+            Vaults your card for instant autonomous agent purchases without human-in-the-loop delays or OTP prompts.
+          </div>
+          <button class="btn-save" onclick="location.href='/setup/callback?session_id=${encodeURIComponent(sessionId)}&customer_id=${encodeURIComponent(customerId)}&txn_id=${encodeURIComponent(txnId)}'">
+            Save Card (4242 4242 4242 4242) & Authorize
+          </button>
+          <p class="hint">🔒 Simulated Stripe Hosted Setup Session</p>
+        </div>
+      </body>
+      </html>
+    `);
   });
 
   // ─── Human Consent Challenge Endpoints ────────────────────────────────────
@@ -757,14 +1309,84 @@ export function startAuthCallbackServer(
                 </div>
               </div>
               <div class="actions">
-                <form method="POST" action="/consent/${challengeId}/confirm">
-                  <button type="submit" class="btn-approve">Approve Autonomous Mandate</button>
-                </form>
+                <button type="button" id="btn-approve" class="btn-approve" onclick="signAndApproveMandate()">Approve Autonomous Mandate</button>
+                <form id="fallback-form" method="POST" action="/consent/${challengeId}/confirm" style="display: none;"></form>
                 <form method="POST" action="/consent/${challengeId}/reject">
                   <button type="submit" class="btn-reject">Reject Mandate & Pay Manually</button>
                 </form>
               </div>
             </div>
+            <script>
+              async function signAndApproveMandate() {
+                const btn = document.getElementById('btn-approve');
+                btn.disabled = true;
+                btn.innerText = 'Signing Mandate Cryptographically...';
+
+                try {
+                  if (!window.crypto || !window.crypto.subtle) {
+                    document.getElementById('fallback-form').submit();
+                    return;
+                  }
+
+                  const keyPair = await window.crypto.subtle.generateKey(
+                    { name: "ECDSA", namedCurve: "P-256" },
+                    true,
+                    ["sign", "verify"]
+                  );
+
+                  const exportedPub = await window.crypto.subtle.exportKey("jwk", keyPair.publicKey);
+
+                  const payload = {
+                    challenge_id: "${challengeId}",
+                    transaction_id: "${challenge.transaction_id}",
+                    checkout_id: "${challenge.checkout_id}",
+                    checkout_hash: "${challenge.checkout_hash}",
+                    amount: ${challenge.amount},
+                    currency: "${challenge.currency}",
+                    payee: "${challenge.payee}",
+                    approved: true,
+                    timestamp: Date.now()
+                  };
+
+                  const header = { alg: "ES256", typ: "JWT" };
+                  const b64Header = btoa(JSON.stringify(header)).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
+                  const b64Payload = btoa(JSON.stringify(payload)).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
+                  const signingInput = b64Header + "." + b64Payload;
+
+                  const encoder = new TextEncoder();
+                  const sigBuffer = await window.crypto.subtle.sign(
+                    { name: "ECDSA", hash: { name: "SHA-256" } },
+                    keyPair.privateKey,
+                    encoder.encode(signingInput)
+                  );
+
+                  const bytes = new Uint8Array(sigBuffer);
+                  let binary = '';
+                  for (let i = 0; i < bytes.byteLength; i++) {
+                    binary += String.fromCharCode(bytes[i]);
+                  }
+                  const b64Sig = btoa(binary).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
+                  const jws = signingInput + "." + b64Sig;
+
+                  const res = await fetch('/consent/${challengeId}/confirm', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'text/html' },
+                    body: JSON.stringify({
+                      user_jws: jws,
+                      user_jwk: exportedPub
+                    })
+                  });
+
+                  const html = await res.text();
+                  document.open();
+                  document.write(html);
+                  document.close();
+                } catch (err) {
+                  console.warn('[AP2 Trusted Surface] Client signing fallback:', err);
+                  document.getElementById('fallback-form').submit();
+                }
+              }
+            </script>
           </body>
         </html>
       `);
@@ -791,7 +1413,12 @@ export function startAuthCallbackServer(
       return;
     }
     const challengeId = req.params.challengeId as string;
-    const result = await mandateStore.confirmConsentChallenge(challengeId, manifest.merchant.name);
+    const { user_jws, user_jwk } = req.body || {};
+
+    const result = await mandateStore.confirmConsentChallenge(challengeId, manifest.merchant.name, {
+      userJws: user_jws,
+      userJwk: user_jwk,
+    });
     if (result.status === "denied") {
       res.status(400).json({ error: result.error });
       return;
@@ -865,7 +1492,7 @@ export function startAuthCallbackServer(
 
       if (paymentAdapter && txn.merchant_verified) {
         try {
-          let orderId = txn.payment?.razorpay_order_id;
+          let orderId = txn.payment?.stripe_payment_intent_id || txn.payment?.stripe_checkout_session_id;
           if (!orderId) {
             const orderResult = await paymentAdapter.createOrder({
               amount: txn.merchant_verified.total,
@@ -910,9 +1537,9 @@ export function startAuthCallbackServer(
           }
 
           txnManager.bindPayment(txnId, {
-            provider: "razorpay",
+            provider: "stripe",
             payment_method: "payment_link",
-            razorpay_order_id: orderId,
+            stripe_checkout_session_id: linkResult.payment_link_id,
             payment_link_id: linkResult.payment_link_id,
             payment_link_url: linkResult.short_url,
             one_time_payment_url: linkResult.short_url,

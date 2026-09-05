@@ -24,8 +24,8 @@ export class TransactionManager {
   private auditLedger: AuditLedger;
   private store?: PersistenceStore;
 
-  constructor(auditLedger: AuditLedger, store?: PersistenceStore) {
-    this.auditLedger = auditLedger;
+  constructor(auditLedger?: AuditLedger, store?: PersistenceStore) {
+    this.auditLedger = auditLedger ?? new AuditLedger();
     this.store = store;
   }
 
@@ -218,10 +218,15 @@ export class TransactionManager {
    */
   bindRefund(transactionId: string, refund: RefundRecord): Transaction {
     const txn = this.get(transactionId);
-    const payment = txn.payment ?? { provider: "razorpay" as const, payment_status: "captured" as const };
-    const refunds = payment.refunds ?? [];
-    if (refunds.some((r) => r.refund_id === refund.refund_id)) {
-      const existingIdx = refunds.findIndex((r) => r.refund_id === refund.refund_id);
+    const payment: PaymentBinding = txn.payment ?? {
+      provider: "stripe",
+      payment_status: "captured",
+      refunds: [],
+      refunded_amount: 0,
+    };
+    const refunds: RefundRecord[] = payment.refunds ?? [];
+    if (refunds.some((r: RefundRecord) => r.refund_id === refund.refund_id)) {
+      const existingIdx = refunds.findIndex((r: RefundRecord) => r.refund_id === refund.refund_id);
       if (existingIdx !== -1) {
         refunds[existingIdx] = { ...refunds[existingIdx], ...refund };
       }

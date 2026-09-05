@@ -212,6 +212,12 @@ export interface OAuth2UserFlowConfig {
    */
   userinfo_url?: string;
 
+  /** JSONPath to extract default shipping address from userinfo. Optional. */
+  shipping_address_path?: string;
+
+  /** JSONPath to extract list of shipping addresses from userinfo. Optional. */
+  shipping_addresses_path?: string;
+
   /**
    * Use PKCE (Proof Key for Code Exchange).
    * Recommended for public clients. Defaults to true.
@@ -847,21 +853,22 @@ export interface TransactionConfig {
     available_date_path?: string;
     charge_timing: "at_order" | "at_fulfillment";
   };
+  payment_link_operation?: OperationMapping;
+  charge_token_operation?: OperationMapping;
 }
 
 // ─── Stage 5: Payment Configuration ──────────────────────────────────────────
 
 export interface PaymentConfig {
-  provider: "razorpay";
-  razorpay_key_id_env: string;
-  razorpay_key_secret_env: string;
+  provider: "stripe";
+  stripe_secret_key_env: string;
+  stripe_publishable_key_env?: string;
   webhook_secret_env?: string;
   integration_type?:
-    | "orders_and_links"
-    | "orders_only"
-    | "links_only"
-    | "subscriptions"
-    | "checkout_only";
+    | "payment_intents_and_checkout"
+    | "payment_intents_only"
+    | "checkout_only"
+    | "orders_and_links";
   capture?: {
     mode: "auto_capture" | "manual_capture";
     capture_trigger?: "on_order_confirm" | "merchant_webhook" | "manual";
@@ -1103,6 +1110,29 @@ export interface OperationsBlock {
   >;
 }
 
+// ─── Observability & Audit Export ──────────────────────────────────────────
+
+export interface TelemetryConfig {
+  /** OTLP HTTP log ingestion endpoint (e.g. "https://api.honeycomb.io/v1/logs" or local OTel collector) */
+  endpoint: string;
+  /** Telemetry provider identifier */
+  provider?: "honeycomb" | "grafana_loki" | "otlp_generic" | string;
+  /** Service name for OpenTelemetry resource attributes (defaults to merchant-mcp-<merchant_name>) */
+  service_name?: string;
+  /** Environment variable name containing API token/key (e.g. "HONEYCOMB_API_KEY") */
+  api_key_env?: string;
+  /** Direct API token/key (optional fallback if not using environment variables) */
+  api_key?: string;
+  /** Custom static HTTP headers to include with log export requests */
+  headers?: Record<string, string>;
+  /** Environment variable name containing JSON-encoded headers (defaults to "AUDIT_EXPORT_OTEL_HEADERS") */
+  headers_env?: string;
+  /** Number of log records to batch before sending HTTP request (default: 10) */
+  batch_size?: number;
+  /** Maximum interval in milliseconds to wait before flushing queued log records (default: 2000) */
+  flush_interval_ms?: number;
+}
+
 // ─── Full Integration Manifest ───────────────────────────────────────────────
 
 export interface IntegrationManifest {
@@ -1114,6 +1144,8 @@ export interface IntegrationManifest {
   error_mapping?: ErrorMapping;
   webhooks?: WebhookConfig;
   integration?: IntegrationConfig;
+  telemetry?: TelemetryConfig;
+  audit?: TelemetryConfig;
 
   // Stage 1: Intent
   intent?: IntentConfig;
@@ -1145,3 +1177,4 @@ export interface IntegrationManifest {
   // Legacy/Domain-Specific Extension
   discovery_schema?: DiscoveryParamSpec[];
 }
+

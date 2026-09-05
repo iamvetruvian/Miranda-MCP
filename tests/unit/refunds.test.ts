@@ -7,7 +7,7 @@ import {
 } from "../../src/policy/gates.js";
 import { PolicyEngine } from "../../src/policy/engine.js";
 import { TransactionManager } from "../../src/transaction/manager.js";
-import { RazorpayAdapter } from "../../src/payment/razorpay.js";
+import { StripeAdapter } from "../../src/payment/stripe.js";
 import { AuditLedger } from "../../src/audit/ledger.js";
 import { ConnectorRuntime } from "../../src/connector/runtime.js";
 import { createMerchantMcpServer } from "../../src/server.js";
@@ -58,9 +58,8 @@ const testManifest: IntegrationManifest = {
     },
   },
   payment: {
-    provider: "razorpay",
-    razorpay_key_id_env: "RAZORPAY_KEY_ID",
-    razorpay_key_secret_env: "RAZORPAY_KEY_SECRET",
+    provider: "stripe",
+    stripe_secret_key_env: "STRIPE_SECRET_KEY",
   },
 };
 
@@ -84,9 +83,8 @@ function createMockCapturedTransaction(overrides?: Partial<Transaction>): Transa
       available: true,
     },
     payment: {
-      provider: "razorpay",
-      razorpay_payment_id: "pay_test_999",
-      razorpay_order_id: "order_test_999",
+      provider: "stripe",
+      stripe_payment_intent_id: "pay_test_999",
       payment_status: "captured",
       refunded_amount: 0,
       refunds: [],
@@ -105,13 +103,13 @@ describe("Component 3: Full Refund & Cancel Lifecycle", () => {
   let auditLedger: AuditLedger;
   let txnManager: TransactionManager;
   let policyEngine: PolicyEngine;
-  let paymentAdapter: RazorpayAdapter;
+  let paymentAdapter: StripeAdapter;
 
   beforeEach(() => {
     auditLedger = new AuditLedger();
     txnManager = new TransactionManager(auditLedger);
     policyEngine = new PolicyEngine();
-    paymentAdapter = new RazorpayAdapter("mock_key", "mock_secret", true);
+    paymentAdapter = new StripeAdapter("mock_key", undefined, true);
   });
 
   describe("RefundBoundsGate Policy Gate", () => {
@@ -259,8 +257,8 @@ describe("Component 3: Full Refund & Cancel Lifecycle", () => {
       });
       txnManager.transition(txn.transaction_id, TransactionState.CHECKOUT_CREATED, "test");
       txnManager.bindPayment(txn.transaction_id, {
-        provider: "razorpay",
-        razorpay_payment_id: "pay_sim_123",
+        provider: "stripe",
+        stripe_payment_intent_id: "pay_sim_123",
         payment_status: "captured",
       });
       txnManager.transition(txn.transaction_id, TransactionState.PAYMENT_PENDING, "test");
@@ -314,8 +312,8 @@ describe("Component 3: Full Refund & Cancel Lifecycle", () => {
       });
       txnManager.transition(txn.transaction_id, TransactionState.CHECKOUT_CREATED, "test");
       txnManager.bindPayment(txn.transaction_id, {
-        provider: "razorpay",
-        razorpay_payment_id: "pay_sim_777",
+        provider: "stripe",
+        stripe_payment_intent_id: "pay_sim_777",
         payment_status: "captured",
       });
       txnManager.transition(txn.transaction_id, TransactionState.PAYMENT_PENDING, "test");
@@ -364,8 +362,8 @@ describe("Component 3: Full Refund & Cancel Lifecycle", () => {
       });
       txnManager.transition(txn.transaction_id, TransactionState.CHECKOUT_CREATED, "test");
       txnManager.bindPayment(txn.transaction_id, {
-        provider: "razorpay",
-        razorpay_payment_id: "pay_wh_888",
+        provider: "stripe",
+        stripe_payment_intent_id: "pay_wh_888",
         payment_status: "captured",
       });
       txnManager.transition(txn.transaction_id, TransactionState.PAYMENT_PENDING, "test");
@@ -415,8 +413,8 @@ describe("Component 3: Full Refund & Cancel Lifecycle", () => {
       });
       txnManager.transition(txn.transaction_id, TransactionState.CHECKOUT_CREATED, "test");
       txnManager.bindPayment(txn.transaction_id, {
-        provider: "razorpay",
-        razorpay_payment_id: "pay_wh_889",
+        provider: "stripe",
+        stripe_payment_intent_id: "pay_wh_889",
         payment_status: "captured",
       });
       txnManager.transition(txn.transaction_id, TransactionState.PAYMENT_PENDING, "test");
@@ -464,8 +462,8 @@ describe("Component 3: Full Refund & Cancel Lifecycle", () => {
       });
       txnManager.transition(txn.transaction_id, TransactionState.CHECKOUT_CREATED, "test");
       txnManager.bindPayment(txn.transaction_id, {
-        provider: "razorpay",
-        razorpay_payment_id: "pay_wh_890",
+        provider: "stripe",
+        stripe_payment_intent_id: "pay_wh_890",
         payment_status: "captured",
       });
       txnManager.transition(txn.transaction_id, TransactionState.PAYMENT_PENDING, "test");
@@ -522,7 +520,7 @@ describe("Component 3: Full Refund & Cancel Lifecycle", () => {
       });
 
       const receipt = generateDecisionReceipt(txn, [], true);
-      expect(receipt).toContain("REFUND ORCHESTRATION (Razorpay Rails)");
+      expect(receipt).toContain("REFUND ORCHESTRATION (Stripe Rails)");
       expect(receipt).toContain("Total Refunded   : ₹15,000.00");
       expect(receipt).toContain("Net Settled      : ₹0.00");
       expect(receipt).toContain("rfnd_rec_001");

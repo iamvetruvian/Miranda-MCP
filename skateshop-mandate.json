@@ -1,0 +1,914 @@
+{
+  "merchant": {
+    "name": "Skateshop",
+    "description": "An open source e-commerce skateshop built with Next.js 14, Stripe Connect, Clerk Google OAuth, and Drizzle ORM",
+    "commerce_domain": "retail",
+    "currency": "USD",
+    "base_url": "http://localhost:3000",
+    "supported_currencies": [
+      "USD"
+    ],
+    "timezone": "America/New_York",
+    "locale": "en-US"
+  },
+  "auth": {
+    "type": "oauth2_authorization_code",
+    "header": "Authorization",
+    "token_prefix": "Bearer",
+    "oauth2_user": {
+      "authorization_url": "https://select-racer-6737.clerk.accounts.dev/oauth/authorize",
+      "token_url": "https://select-racer-6737.clerk.accounts.dev/oauth/token",
+      "userinfo_url": "https://select-racer-6737.clerk.accounts.dev/oauth/userinfo",
+      "client_id": "fM0IjuVqgPrPGsOk",
+      "client_secret": "DzOKmnTJfRC8MN9xQ1NF8pBd7H0kgP9J",
+      "client_id_env": "SKATESHOP_CLERK_OAUTH_CLIENT_ID",
+      "client_secret_env": "SKATESHOP_CLERK_OAUTH_CLIENT_SECRET",
+      "redirect_uri": "http://localhost:3102/auth/callback",
+      "scopes": [
+        "openid",
+        "profile",
+        "email"
+      ],
+      "use_pkce": true,
+      "session_ttl_seconds": 2592000,
+      "user_id_path": "$.sub",
+      "user_name_path": "$.name",
+      "user_email_path": "$.email",
+      "shipping_address_path": "$.shipping_address",
+      "shipping_addresses_path": "$.shipping_addresses"
+    },
+    "protected_operations": [
+      "create_checkout",
+      "confirm_order",
+      "cancel_order",
+      "get_order_status",
+      "add_to_cart",
+      "get_cart",
+      "get_store_orders",
+      "manage_subscription_plan"
+    ],
+    "public_operations": [
+      "search",
+      "get_product",
+      "get_checkout",
+      "get_subscription_plans",
+      "filter_products",
+      "build_a_board",
+      "subscribe_newsletter"
+    ]
+  },
+  "http_conventions": {
+    "content_type": "application/json",
+    "accept": "application/json",
+    "default_headers": {
+      "Accept": "application/json"
+    },
+    "retry": {
+      "max_retries": 3,
+      "retryable_status_codes": [
+        429,
+        500,
+        502,
+        503,
+        504
+      ],
+      "initial_backoff_ms": 1000,
+      "max_backoff_ms": 10000
+    },
+    "timeout": {
+      "request_timeout_ms": 15000
+    },
+    "error_message_path": "$.message"
+  },
+  "pagination": {
+    "strategy": "page_number",
+    "page_param": "page",
+    "page_size_param": "per_page",
+    "default_page_size": 8,
+    "first_page": 1,
+    "total_count_path": "$.pageCount"
+  },
+  "error_mapping": {
+    "status_code_map": {
+      "400": {
+        "category": "invalid_input",
+        "retryable": false,
+        "message": "Invalid search or checkout parameters"
+      },
+      "401": {
+        "category": "auth_failed",
+        "retryable": false,
+        "message": "Clerk authentication required or token expired"
+      },
+      "404": {
+        "category": "not_found",
+        "retryable": false,
+        "message": "Product, store, or order not found"
+      },
+      "409": {
+        "category": "out_of_stock",
+        "retryable": false,
+        "message": "Product item is currently out of stock"
+      },
+      "429": {
+        "category": "rate_limited",
+        "retryable": true,
+        "message": "Upstash rate limit reached, retry later"
+      },
+      "500": {
+        "category": "server_error",
+        "retryable": true,
+        "message": "Internal server error encountered in Skateshop"
+      }
+    }
+  },
+  "intent": {
+    "primary_mode": "search",
+    "category_tree": {
+      "operation": {
+        "method": "GET",
+        "path": "/categories/skateboards"
+      },
+      "categories_path": "$.categories",
+      "category_mapping": {
+        "id_path": "$.id",
+        "name_path": "$.name",
+        "children_path": "$.subcategories"
+      },
+      "usable_as_filter": true,
+      "filter_key": "categories"
+    },
+    "autocomplete": {
+      "operation": {
+        "method": "POST",
+        "path": "/products",
+        "headers": {
+          "Next-Action": "c7c56a9b4e75ecaa5b98586943e7b872baecb9be",
+          "Accept": "text/x-component",
+          "Content-Type": "application/json"
+        }
+      },
+      "suggestions_path": "$.data",
+      "suggestion_mapping": {
+        "text_path": "$.name"
+      },
+      "min_chars": 2
+    },
+    "recommendations": {
+      "trigger": "standalone",
+      "operation": {
+        "method": "GET",
+        "path": "/"
+      },
+      "items_path": "$.featuredProducts",
+      "uses_offer_mapping": true
+    }
+  },
+  "discovery": {
+    "search_type": "keyword",
+    "empty_query_allowed": true
+  },
+  "refinements": {
+    "mode": "derived",
+    "derive_from_attributes": [
+      "category",
+      "subcategory",
+      "price",
+      "rating",
+      "storeId"
+    ],
+    "static_filters": [
+      {
+        "key": "category",
+        "label": "Category",
+        "type": "enum",
+        "options": [
+          { "value": "skateboards", "label": "Skateboards" },
+          { "value": "clothing", "label": "Clothing" },
+          { "value": "shoes", "label": "Shoes" },
+          { "value": "accessories", "label": "Accessories" }
+        ]
+      },
+      {
+        "key": "subcategory",
+        "label": "Subcategory",
+        "type": "enum",
+        "options": [
+          { "value": "decks", "label": "Decks" },
+          { "value": "wheels", "label": "Wheels" },
+          { "value": "trucks", "label": "Trucks" },
+          { "value": "bearings", "label": "Bearings" },
+          { "value": "griptape", "label": "Griptape" },
+          { "value": "hardware", "label": "Hardware" },
+          { "value": "tools", "label": "Tools" },
+          { "value": "t-shirts", "label": "T-shirts" },
+          { "value": "hoodies", "label": "Hoodies" },
+          { "value": "pants", "label": "Pants" },
+          { "value": "shorts", "label": "Shorts" },
+          { "value": "hats", "label": "Hats" },
+          { "value": "low-tops", "label": "Low Tops" },
+          { "value": "high-tops", "label": "High Tops" },
+          { "value": "slip-ons", "label": "Slip-ons" }
+        ]
+      },
+      {
+        "key": "price_range",
+        "label": "Price Range",
+        "type": "enum",
+        "options": [
+          { "value": "0-50", "label": "Under $50" },
+          { "value": "50-100", "label": "$50 - $100" },
+          { "value": "100-200", "label": "$100 - $200" },
+          { "value": "200-500", "label": "$200 - $500" }
+        ]
+      },
+      {
+        "key": "active",
+        "label": "Stripe Connected Stores",
+        "type": "enum",
+        "options": [
+          { "value": "true", "label": "Verified Stores (Ready to Purchase)" },
+          { "value": "false", "label": "All Stores" }
+        ]
+      }
+    ],
+    "option_pagination": {
+      "max_options_in_search": 10,
+      "sort_by": "count"
+    }
+  },
+  "sort_options": {
+    "options": [
+      {
+        "key": "newest",
+        "label": "Newest",
+        "merchant_value": "createdAt.desc"
+      },
+      {
+        "key": "relevance",
+        "label": "Relevance",
+        "merchant_value": ""
+      },
+      {
+        "key": "price_asc",
+        "label": "Price: Low to High",
+        "merchant_value": "price.asc"
+      },
+      {
+        "key": "price_desc",
+        "label": "Price: High to Low",
+        "merchant_value": "price.desc"
+      },
+      {
+        "key": "rating_desc",
+        "label": "Highest Rated",
+        "merchant_value": "rating.desc"
+      },
+      {
+        "key": "name_asc",
+        "label": "Alphabetical (A-Z)",
+        "merchant_value": "name.asc"
+      }
+    ],
+    "default": "newest",
+    "sort_param": "sort"
+  },
+  "attribute_catalog": {
+    "attributes": [
+      {
+        "key": "category",
+        "label": "Category",
+        "type": "string",
+        "filterable": true
+      },
+      {
+        "key": "subcategory",
+        "label": "Subcategory",
+        "type": "string",
+        "filterable": true
+      },
+      {
+        "key": "price",
+        "label": "Price",
+        "type": "money",
+        "sortable": true
+      },
+      {
+        "key": "rating",
+        "label": "Customer Rating",
+        "type": "number",
+        "sortable": true
+      },
+      {
+        "key": "inventory",
+        "label": "Stock Inventory",
+        "type": "number",
+        "filterable": true
+      },
+      {
+        "key": "storeId",
+        "label": "Merchant Store ID",
+        "type": "string",
+        "filterable": true
+      },
+      {
+        "key": "stripeAccountId",
+        "label": "Stripe Connect ID",
+        "type": "string",
+        "filterable": true
+      }
+    ]
+  },
+  "offer": {
+    "variants": {
+      "dimensions": [
+        {
+          "key": "size",
+          "label": "Size / Dimensions",
+          "required": false,
+          "source": "static",
+          "static_options": [
+            { "value": "7.75", "label": "7.75\" Deck / S" },
+            { "value": "8.0", "label": "8.0\" Deck / M" },
+            { "value": "8.25", "label": "8.25\" Deck / L" },
+            { "value": "8.5", "label": "8.5\" Deck / XL" }
+          ],
+          "affects_price": false,
+          "affects_availability": true
+        },
+        {
+          "key": "color",
+          "label": "Colorway",
+          "required": false,
+          "source": "static",
+          "static_options": [
+            { "value": "black", "label": "Black" },
+            { "value": "white", "label": "White" },
+            { "value": "natural", "label": "Natural Wood" },
+            { "value": "red", "label": "Red" }
+          ],
+          "affects_price": false,
+          "affects_availability": true
+        }
+      ],
+      "price_resolution": "included_in_product"
+    },
+    "bundles": {
+      "supported": true,
+      "customizable": true
+    },
+    "add_ons": {
+      "supported": true,
+      "source": "in_product_detail"
+    },
+    "pricing": {
+      "model": "fixed",
+      "prices_include_tax": false,
+      "tax_display": "calculated_at_checkout",
+      "subscription": {
+        "periods": [
+          "monthly"
+        ],
+        "period_param": "interval"
+      }
+    },
+    "availability": {
+      "model": "stock_count",
+      "stock_count_path": "$.inventory",
+      "low_stock_threshold": 5,
+      "check_operation": {
+        "method": "GET",
+        "path": "/api/products/:product_id"
+      }
+    },
+    "media": {
+      "images_path": "$.images",
+      "image_url_path": "$.images[0].url"
+    }
+  },
+  "transaction": {
+    "cart": {
+      "model": "multi_item",
+      "multi_item": {
+        "add_item_operation": {
+          "method": "POST",
+          "path": "/api/cart"
+        },
+        "get_cart_operation": {
+          "method": "GET",
+          "path": "/api/cart/:cart_id"
+        },
+        "remove_item_operation": {
+          "method": "DELETE",
+          "path": "/api/cart"
+        },
+        "update_quantity_operation": {
+          "method": "PATCH",
+          "path": "/api/cart"
+        },
+        "cart_item_mapping": {
+          "item_id_path": "$.productId",
+          "product_id_path": "$.productId",
+          "quantity_path": "$.quantity",
+          "unit_price_path": "$.price"
+        },
+        "cart_total_path": "$.total",
+        "persistent": true
+      }
+    },
+    "checkout_flow": {
+      "type": "single_step"
+    },
+    "customer_data": {
+      "required": [],
+      "optional": [
+        {
+          "field": "email",
+          "label": "Email Address",
+          "type": "email"
+        },
+        {
+          "field": "full_name",
+          "label": "Full Name",
+          "type": "string"
+        },
+        {
+          "field": "shipping_address",
+          "label": "Shipping Address",
+          "type": "address",
+          "address_components": [
+            "line1",
+            "line2",
+            "city",
+            "state",
+            "postal_code",
+            "country"
+          ]
+        }
+      ]
+    },
+    "delivery": {
+      "type": "shipping",
+      "options_available": true,
+      "shipping_options": {
+        "operation": {
+          "method": "GET",
+          "path": "/cart"
+        },
+        "options_path": "$.shipping_options",
+        "option_mapping": {
+          "id_path": "$.id",
+          "name_path": "$.name",
+          "price_path": "$.price"
+        },
+        "selection_param": "shipping_option_id"
+      }
+    },
+    "coupons": {
+      "supported": true,
+      "apply_operation": {
+        "method": "POST",
+        "path": "/cart/coupon"
+      },
+      "code_param": "code",
+      "discount_amount_path": "$.discount",
+      "message_path": "$.message"
+    },
+    "fees": {
+      "fee_types": [
+        {
+          "type": "stripe_processing_fee",
+          "label": "Stripe Application Fee",
+          "calculation": "included_in_checkout_total"
+        }
+      ]
+    }
+  },
+  "payment": {
+    "provider": "stripe",
+    "stripe_secret_key_env": "STRIPE_API_KEY",
+    "stripe_publishable_key_env": "NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY",
+    "webhook_secret_env": "STRIPE_WEBHOOK_SECRET",
+    "integration_type": "payment_intents_and_checkout",
+    "capture": {
+      "mode": "auto_capture",
+      "capture_trigger": "on_order_confirm"
+    },
+    "allowed_methods": {
+      "methods": [
+        "card"
+      ]
+    },
+    "payment_link": {
+      "expire_after_seconds": 3600
+    },
+    "subscriptions": {
+      "plan_id_source": "manifest",
+      "default_plan_id": "standard",
+      "plan_operation": {
+        "method": "POST",
+        "path": "/products",
+        "headers": {
+          "Next-Action": "5322271804d0affca78a3cddfb413b9aa241ab9e",
+          "Accept": "text/x-component"
+        }
+      }
+    }
+  },
+  "outcome": {
+    "status_mapping": {
+      "merchant_to_canonical": {
+        "succeeded": "confirmed",
+        "processing": "processing",
+        "requires_payment_method": "payment_pending",
+        "canceled": "cancelled",
+        "failed": "failed"
+      },
+      "status_path": "$.stripePaymentIntentStatus"
+    },
+    "fulfillment": {
+      "type": "physical_shipping",
+      "shipping": {
+        "tracking_operation": {
+          "method": "GET",
+          "path": "/dashboard/purchases/:order_id"
+        },
+        "tracking_number_path": "$.trackingNumber",
+        "carrier_path": "$.carrier"
+      }
+    },
+    "cancellation": {
+      "supported": true,
+      "policy": {
+        "free_window_seconds": 86400,
+        "accepted_reasons": [
+          {
+            "value": "customer_requested",
+            "label": "Customer requested order cancellation"
+          },
+          {
+            "value": "duplicate_order",
+            "label": "Duplicate order placed by mistake"
+          },
+          {
+            "value": "shipping_delay",
+            "label": "Shipping timeline longer than acceptable"
+          }
+        ]
+      }
+    },
+    "returns": {
+      "supported": true,
+      "policy": {
+        "window_days": 30,
+        "conditions": [
+          "unused",
+          "in_original_packaging"
+        ],
+        "return_shipping": "merchant_paid"
+      },
+      "initiate_operation": {
+        "method": "POST",
+        "path": "/dashboard/purchases/:order_id/returns"
+      }
+    },
+    "merchant_refund": {
+      "has_merchant_refund": true,
+      "request_operation": {
+        "method": "POST",
+        "path": "/dashboard/purchases/:order_id/refund"
+      },
+      "partial_supported": true
+    },
+    "invoice": {
+      "available": true,
+      "operation": {
+        "method": "GET",
+        "path": "/dashboard/purchases/:order_id"
+      },
+      "format": "html"
+    }
+  },
+  "operations": {
+    "search": {
+      "method": "GET",
+      "path": "/api/products",
+      "request_mapping": {
+        "q": {
+          "from": "$.query"
+        },
+        "page": {
+          "from": "$.page"
+        },
+        "per_page": {
+          "from": "$.pageSize"
+        },
+        "sort": {
+          "from": "$.sort"
+        },
+        "categories": {
+          "from": "$.filters.category"
+        },
+        "subcategories": {
+          "from": "$.filters.subcategory"
+        },
+        "price_range": {
+          "from": "$.filters.price_range"
+        },
+        "store_ids": {
+          "from": "$.filters.store_id"
+        },
+        "active": {
+          "from": "$.filters.active"
+        }
+      },
+      "response_path": "$.data",
+      "total_path": "$.pageCount"
+    },
+    "get_product": {
+      "method": "GET",
+      "path": "/api/products/:product_id"
+    },
+    "create_checkout": {
+      "method": "POST",
+      "path": "/api/checkout",
+      "request_mapping": {
+        "storeId": {
+          "from": "$.metadata.store_id",
+          "transform": {
+            "type": "default",
+            "value": "str_baker_skate"
+          }
+        },
+        "items[0].id": {
+          "from": "$.product_id"
+        },
+        "items[0].quantity": {
+          "from": "$.quantity"
+        },
+        "items[0].price": {
+          "from": "$.unit_price.amount",
+          "transform": {
+            "type": "divide",
+            "value": 100
+          }
+        }
+      }
+    },
+    "get_checkout": {
+      "method": "GET",
+      "path": "/api/checkout/:checkout_id"
+    },
+    "confirm_order": {
+      "method": "POST",
+      "path": "/api/orders/:checkout_id",
+      "request_mapping": {
+        "payment_id": {
+          "from": "$.payment_id"
+        },
+        "status": {
+          "from": null,
+          "transform": {
+            "type": "default",
+            "value": "succeeded"
+          }
+        }
+      }
+    },
+    "get_order_status": {
+      "method": "GET",
+      "path": "/api/orders/:order_id"
+    },
+    "cancel_order": {
+      "method": "POST",
+      "path": "/api/orders/:order_id/cancel"
+    },
+    "check_availability": {
+      "method": "GET",
+      "path": "/api/products/:product_id"
+    },
+    "add_to_cart": {
+      "method": "POST",
+      "path": "/api/cart"
+    },
+    "apply_coupon": {
+      "method": "POST",
+      "path": "/cart/coupon"
+    },
+    "calculate_fees": {
+      "method": "POST",
+      "path": "/cart/calculate"
+    },
+    "request_refund": {
+      "method": "POST",
+      "path": "/dashboard/purchases/:order_id/refund"
+    },
+    "custom": {
+      "filter_products": {
+        "method": "POST",
+        "path": "/products",
+        "headers": {
+          "Next-Action": "c7c56a9b4e75ecaa5b98586943e7b872baecb9be",
+          "Accept": "text/x-component"
+        },
+        "description": "Live product and category typeahead search via Server Action"
+      },
+      "get_subscription_plans": {
+        "method": "POST",
+        "path": "/products",
+        "headers": {
+          "Next-Action": "5322271804d0affca78a3cddfb413b9aa241ab9e",
+          "Accept": "text/x-component"
+        },
+        "description": "Fetch all merchant subscription plans (Free, Standard, Pro) from Stripe"
+      },
+      "manage_subscription_plan": {
+        "method": "POST",
+        "path": "/products",
+        "headers": {
+          "Next-Action": "19abce46074e7b2aca772f8e665942d4930c104e",
+          "Accept": "text/x-component"
+        },
+        "description": "Create Stripe customer billing portal or subscription checkout session"
+      },
+      "build_a_board": {
+        "method": "GET",
+        "path": "/build-a-board",
+        "description": "Interactive custom skateboard builder configuration and component inventory"
+      },
+      "subscribe_newsletter": {
+        "method": "POST",
+        "path": "/api/email/newsletter",
+        "description": "Subscribe customer email to Skateshop newsletter and marketing updates"
+      },
+      "revalidate_cache": {
+        "method": "GET",
+        "path": "/api/revalidate",
+        "description": "Trigger on-demand ISR revalidation across all static store pages and catalogs"
+      },
+      "get_store_orders": {
+        "method": "GET",
+        "path": "/dashboard/store/:store_id/orders",
+        "description": "Retrieve order history and fulfillment roster for a merchant store"
+      },
+      "get_store_analytics": {
+        "method": "GET",
+        "path": "/dashboard/store/:store_id/analytics",
+        "description": "Retrieve store performance, gross sales, and order volume analytics"
+      },
+      "create_payment_link": {
+        "method": "POST",
+        "path": "/checkout/:checkout_id/pay-link",
+        "description": "Generate hosted Stripe payment link directly from merchant backend"
+      },
+      "charge_token": {
+        "method": "POST",
+        "path": "/checkout/:checkout_id/charge",
+        "description": "Execute autonomous recurring S2S token payment charge against merchant backend",
+        "request_mapping": {
+          "token": {
+            "from": "$.token"
+          },
+          "amount": {
+            "from": "$.amount"
+          }
+        }
+      }
+    }
+  },
+  "field_mappings": {
+    "offer": {
+      "offer_id": {
+        "from": "$.id"
+      },
+      "title": {
+        "from": "$.name"
+      },
+      "description": {
+        "from": "$.description"
+      },
+      "price.amount": {
+        "from": "$.price",
+        "transform": {
+          "type": "multiply",
+          "value": 100
+        }
+      },
+      "price.currency": {
+        "from": null,
+        "transform": {
+          "type": "default",
+          "value": "USD"
+        }
+      },
+      "availability": {
+        "from": "$.inventory",
+        "transform": {
+          "type": "enum",
+          "enum_map": {
+            "0": "out_of_stock",
+            "*": "in_stock"
+          }
+        }
+      },
+      "attributes.category": {
+        "from": "$.category"
+      },
+      "attributes.subcategory": {
+        "from": "$.subcategory"
+      },
+      "attributes.rating": {
+        "from": "$.rating"
+      },
+      "attributes.inventory": {
+        "from": "$.inventory"
+      },
+      "attributes.storeId": {
+        "from": "$.storeId"
+      },
+      "attributes.stripeAccountId": {
+        "from": "$.stripeAccountId"
+      },
+      "attributes.image": {
+        "from": "$.images[0].url"
+      },
+      "stock_count": {
+        "from": "$.inventory"
+      }
+    },
+    "checkout": {
+      "checkout_id": {
+        "from": "$.id"
+      },
+      "payment_url": {
+        "from": "$.paymentUrl"
+      },
+      "sku": {
+        "from": "$.items[0].productId"
+      },
+      "total.amount": {
+        "from": "$.amount",
+        "transform": {
+          "type": "multiply",
+          "value": 100
+        }
+      },
+      "total.currency": {
+        "from": null,
+        "transform": {
+          "type": "default",
+          "value": "USD"
+        }
+      },
+      "available": {
+        "from": null,
+        "transform": {
+          "type": "default",
+          "value": true
+        }
+      },
+      "details.clientSecret": {
+        "from": "$.clientSecret"
+      }
+    },
+    "order": {
+      "order_id": {
+        "from": "$.id"
+      },
+      "status": {
+        "from": "$.stripePaymentIntentStatus",
+        "transform": {
+          "type": "enum",
+          "enum_map": {
+            "succeeded": "confirmed",
+            "processing": "processing",
+            "requires_payment_method": "payment_pending",
+            "canceled": "cancelled",
+            "*": "confirmed"
+          }
+        }
+      },
+      "confirmed_at": {
+        "from": "$.createdAt"
+      },
+      "fulfillment.recipient": {
+        "from": "$.name"
+      },
+      "fulfillment.email": {
+        "from": "$.email"
+      }
+    }
+  },
+  "integration": {
+    "type": "rest_manifest",
+    "manifest_version": "2.0.0"
+  },
+  "telemetry": {
+    "provider": "honeycomb",
+    "endpoint": "https://api.honeycomb.io/v1/logs",
+    "service_name": "skateshop-mcp",
+    "api_key_env": "HONEYCOMB_API_KEY",
+    "batch_size": 10,
+    "flush_interval_ms": 2000
+  }
+}

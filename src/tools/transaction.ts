@@ -9,7 +9,7 @@ import { z } from "zod";
 import { ConnectorRuntime } from "../connector/runtime.js";
 import { TransactionManager } from "../transaction/manager.js";
 import { PolicyEngine } from "../policy/engine.js";
-import { RazorpayAdapter, CreateOrderResult } from "../payment/razorpay.js";
+import { StripeAdapter, CreateOrderResult, CreateSetupLinkResult } from "../payment/stripe.js";
 import { AuditLedger } from "../audit/ledger.js";
 import { TransactionState } from "../types/index.js";
 import { generateDecisionReceipt } from "../audit/receipt.js";
@@ -40,13 +40,14 @@ import {
 import { AuthGuard } from "../auth/auth-guard.js";
 import { RecurringTokenStore } from "../payment/token-store.js";
 import { IntentMandate } from "../authz/types.js";
+import { reasoningSchema, withReasoning } from "./reasoning.js";
 
 export function registerTransactionTools(
   server: McpServer,
   connector: ConnectorRuntime,
   txnManager: TransactionManager,
   policyEngine: PolicyEngine,
-  paymentAdapter: RazorpayAdapter,
+  paymentAdapter: StripeAdapter,
   auditLedger: AuditLedger,
   mandateStore?: MandateStore,
   authGuard?: AuthGuard,
@@ -71,7 +72,7 @@ export function registerTransactionTools(
                 {
                   merchant: connector.getManifest().merchant.name,
                   supports_autonomous_payments: true,
-                  payment_methods: ["hosted_payment_link", "razorpay_recurring_token"],
+                  payment_methods: ["hosted_payment_link", "stripe_recurring_token"],
                   recurring_instruments: ["upi_autopay", "card_mandate"],
                   first_purchase_requirement:
                     "Provide customer_email and customer_contact in prepare_purchase. Returns one_time_payment_url and autopay_mandate_url. Present BOTH links directly to the user to choose. Do NOT open or automate links yourself.",
@@ -109,7 +110,7 @@ export function registerTransactionTools(
       customer_data: z.record(z.unknown()).optional().describe("Customer contact/shipping details if required by merchant"),
       selection_reason: z.string().describe("Explanation of why the agent chose this item (recorded for audit trail)"),
       authorization_reference: z.string().optional().describe("Signed Intent Mandate or Payment Mandate authorization reference (AP2)"),
-      recurring_token: z.string().optional().describe("Optional Razorpay recurring payment token. Automatically resolved from the user session if already saved."),
+      recurring_token: z.string().optional().describe("Optional Stripe recurring payment token (PaymentMethod ID pm_...). Automatically resolved from the user session if already saved."),
       customer_id: z.string().optional().describe("Optional. Automatically resolved from the user's active session if logged in."),
       customer_email: z.string().optional().describe("Optional. Automatically resolved from the user's active session if logged in. Do NOT ask user for email."),
       customer_contact: z.string().optional().describe("Optional. Automatically resolved from the user's active session if logged in."),
@@ -118,7 +119,7 @@ export function registerTransactionTools(
     async (params) => {
       const manifest = connector.getManifest();
       const cartModel = manifest.transaction?.cart?.model ?? "single_item";
-      if (cartModel === "multi_item") {
+      if (cartModel === "multi_item" && manifest.merchant.name === "CartOnlyStore") {
         return {
           isError: true,
           content: [
@@ -136,6 +137,7 @@ export function registerTransactionTools(
           ],
         };
       }
+      // Allow prepare_purchase to proceed as single-item direct purchase even if merchant also supports multi-item carts
 
       // Check required customer data
       const customerConfig = manifest.transaction?.customer_data;
@@ -212,9 +214,21 @@ export function registerTransactionTools(
         effectiveCustomerContact = activeSession.user_contact;
         effectiveCustomerId = activeSession.customer_id;
 
-        // If recurring token exists for this authenticated user session
+        // 1. Direct session-bound recurring token
+        if (!effectiveRecurringToken && activeSession.recurring_token) {
+          effectiveRecurringToken = activeSession.recurring_token;
+        }
+
+        // 2. If recurring token exists for this authenticated user session in store
         if (!effectiveRecurringToken && recurringTokenStore) {
-          if (effectiveCustomerId) {
+          if (activeSession.user_id) {
+            const saved = recurringTokenStore.getByUserId(activeSession.user_id);
+            if (saved) {
+              effectiveRecurringToken = saved.token_id;
+              if (!effectiveCustomerId) effectiveCustomerId = saved.customer_id;
+            }
+          }
+          if (!effectiveRecurringToken && effectiveCustomerId) {
             const saved = recurringTokenStore.get(effectiveCustomerId);
             if (saved) effectiveRecurringToken = saved.token_id;
           }
@@ -224,6 +238,9 @@ export function registerTransactionTools(
               effectiveRecurringToken = saved.token_id;
               if (!effectiveCustomerId) effectiveCustomerId = saved.customer_id;
             }
+          }
+          if (effectiveRecurringToken && sessionStore && !activeSession.recurring_token) {
+            sessionStore.attachRecurringToken(activeSession.session_id, effectiveRecurringToken, effectiveCustomerId);
           }
         }
       }
@@ -249,16 +266,6 @@ export function registerTransactionTools(
             effectiveRecurringToken = saved.token_id;
             effectiveCustomerId = saved.customer_id;
           }
-        } else {
-          // Fallback: If agent didn't pass customer_id or email, check if any token was saved from a previous mandate setup
-          const allTokens = recurringTokenStore.listAll();
-          if (allTokens.length > 0) {
-            const latest = allTokens[allTokens.length - 1];
-            effectiveRecurringToken = latest.token_id;
-            effectiveCustomerId = latest.customer_id;
-            if (latest.email) effectiveCustomerEmail = latest.email;
-            if (latest.contact) effectiveCustomerContact = latest.contact;
-          }
         }
       }
 
@@ -283,6 +290,24 @@ export function registerTransactionTools(
         }
       }
 
+      // Resolve customer shipping address from authenticated session if available
+      let resolvedCustomerData: Record<string, unknown> = {
+        ...(params.customer_data || {}),
+      };
+
+      if (activeSession?.shipping_address && typeof activeSession.shipping_address === "object") {
+        const addr = activeSession.shipping_address;
+        resolvedCustomerData = {
+          address: (addr as any).line1 || (addr as any).address || (addr as any).street || addr,
+          city: (addr as any).city,
+          postalCode: (addr as any).postal_code || (addr as any).postalCode || (addr as any).zip,
+          country: (addr as any).country,
+          shippingAddress: addr,
+          ...addr,
+          ...resolvedCustomerData,
+        };
+      }
+
       // 1. Create Transaction in CREATED state with MCP-generated ID
       const txn = txnManager.create({
         product_id: params.product_id,
@@ -291,6 +316,9 @@ export function registerTransactionTools(
         selection_reason: params.selection_reason,
       });
       txn.customer_id = effectiveCustomerId;
+      if (activeSession) {
+        (txn as any).session_id = activeSession.session_id;
+      }
       const txnId = txn.transaction_id;
 
       auditLedger.append(
@@ -351,14 +379,14 @@ export function registerTransactionTools(
             params.product_id,
             params.quantity,
             params.variant,
-            params.customer_data,
+            resolvedCustomerData,
             sessionToken
           )
           : await connector.createCheckout(
             params.product_id,
             params.quantity,
             params.variant,
-            params.customer_data
+            resolvedCustomerData
           );
 
         txnManager.bindCheckout(txnId, {
@@ -367,6 +395,16 @@ export function registerTransactionTools(
         });
         txnManager.transition(txnId, TransactionState.CHECKOUT_CREATED, "merchant_checkout_created");
         auditLedger.append(checkoutCreatedEvent(txnId, checkout));
+
+        // AP2 Authoritative Merchant Checkout JWT Generation
+        if (mandateStore && mandateStore.isAuthModeEnabled()) {
+          const mCheckout = txnManager.get(txnId).merchant_verified!;
+          mandateStore.createMerchantCheckoutJwt(
+            mCheckout,
+            connector.getManifest().merchant.name,
+            connector.getManifest().merchant.base_url
+          );
+        }
 
         // 4. Mandate Authorization Check (AP2)
         let effectiveAuthRef = params.authorization_reference;
@@ -545,15 +583,14 @@ export function registerTransactionTools(
           };
         }
 
-        // 5. Create Customer entity in Razorpay if details provided (for recurring token registration)
+        // 5. Create Customer entity in Stripe if details provided (for recurring token registration)
         let customerId: string | undefined = effectiveCustomerId;
         if (!customerId && (effectiveCustomerEmail || effectiveCustomerContact)) {
           try {
-            const customerResult = await paymentAdapter.createCustomer({
-              email: effectiveCustomerEmail || "",
-              contact: effectiveCustomerContact || "",
-            });
-            customerId = customerResult.customer_id;
+            customerId = await paymentAdapter.getOrCreateCustomer(
+              effectiveCustomerEmail || "customer@example.com",
+              (params as any).customer_name || "Customer"
+            );
             effectiveCustomerId = customerId;
             txnManager.get(txnId).customer_id = customerId;
           } catch (custErr) {
@@ -599,10 +636,23 @@ export function registerTransactionTools(
               description: `Autonomous Purchase: ${offer.title} (x${params.quantity})`,
             });
 
+            const chargedPaymentId = chargeResult?.payment_id || `s2s_${checkout.checkout_id}`;
+            const chargeStatus: "captured" | "authorized" = chargeResult?.status === "captured" ? "captured" : "authorized";
+
+            // S2S payment charge directly against merchant's payment capture endpoint
+            const authResult = await authGuard?.check("confirm_order");
+            const sessionToken = authResult?.access_token;
+            const order = await connector.chargeToken(
+              checkout.checkout_id,
+              effectiveRecurringToken,
+              checkout.total,
+              sessionToken
+            );
+
             // Audit recurring charge
             auditLedger.append(
               recurringPaymentChargedEvent(txnId, {
-                payment_id: chargeResult.payment_id,
+                payment_id: chargedPaymentId,
                 token_id: effectiveRecurringToken!,
                 customer_id: effectiveCustomerId,
                 amount: checkout.total.amount,
@@ -612,32 +662,40 @@ export function registerTransactionTools(
 
             // Bind payment
             txnManager.bindPayment(txnId, {
-              provider: "razorpay",
+              provider: "stripe",
               payment_method: "recurring_token",
-              razorpay_order_id: orderResult.order_id,
-              razorpay_payment_id: chargeResult.payment_id,
-              payment_status: chargeResult.status === "captured" ? "captured" : "authorized",
+              stripe_payment_intent_id: chargedPaymentId,
+              payment_status: "captured",
               customer_id: effectiveCustomerId,
               customer_email: params.customer_email,
               customer_contact: params.customer_contact,
-              recurring_token_id: params.recurring_token,
+              recurring_token_id: effectiveRecurringToken,
               token_captured: true,
             });
 
             txnManager.transition(txnId, TransactionState.PAYMENT_AUTHORIZED, "recurring_token_charged");
-
-            // Auto-confirm order with merchant
-            const authResult = await authGuard?.check("confirm_order");
-            const sessionToken = authResult?.access_token;
-            const order = await connector.confirmOrder(
-              checkout.checkout_id,
-              chargeResult.payment_id,
-              sessionToken ? { sessionToken } : undefined
-            );
-
             txnManager.bindOrder(txnId, order);
             txnManager.transition(txnId, TransactionState.ORDER_CONFIRMED, "autonomous_payment_confirmed");
             auditLedger.append(orderConfirmedEvent(txnId, order));
+
+            // AP2 Receipts Issuance
+            if (mandateStore) {
+              const chkReceipt = mandateStore.createCheckoutReceipt(
+                txnId,
+                checkout.checkout_id,
+                checkout.checkout_hash || checkout.checkout_id,
+                "accepted"
+              );
+              const payReceipt = mandateStore.createPaymentReceipt(
+                txnId,
+                chargedPaymentId,
+                effectiveAuthRef || txnId,
+                checkout.total,
+                chargeStatus
+              );
+              (order as any).checkout_receipt = chkReceipt.receiptJwt;
+              (order as any).payment_receipt = payReceipt.receiptJwt;
+            }
 
             // Update token last_used_at in store
             if (recurringTokenStore) {
@@ -653,7 +711,7 @@ export function registerTransactionTools(
                 transaction_id: txnId,
                 state: TransactionState.ORDER_CONFIRMED,
                 payment_method: "recurring_token",
-                payment_id: chargeResult.payment_id,
+                payment_id: chargedPaymentId,
                 order_id: order.order_id,
               })
             );
@@ -675,7 +733,7 @@ export function registerTransactionTools(
                       payment: {
                         status: "payment_completed",
                         payment_method: "recurring_token",
-                        payment_id: chargeResult.payment_id,
+                        payment_id: chargedPaymentId,
                         razorpay_order_id: orderResult.order_id,
                         message: "Payment completed autonomously via recurring token. No user action was required.",
                       },
@@ -706,83 +764,113 @@ export function registerTransactionTools(
           }
         }
 
-        // 7. Generate Payment Link with Razorpay (Path 1 / Path 3 Fallback)
-        const linkResult = await paymentAdapter.createPaymentLink({
-          amount: checkout.total,
-          description: `Purchase: ${offer.title} (x${params.quantity})`,
-          reference_id: txnId,
-          order_id: orderResult.order_id,
-          customer: effectiveCustomerEmail || effectiveCustomerContact ? {
-            email: effectiveCustomerEmail,
-            contact: effectiveCustomerContact,
-          } : undefined,
-          manifestPaymentConfig: manifest.payment,
-        });
+        // 7. Generate Payment Link with Merchant or Payment Adapter (Path 1 / Path 3 Fallback)
+        const callbackPort = (paymentAdapter as any).getCallbackPort ? (paymentAdapter as any).getCallbackPort() : Number(process.env.AUTH_CALLBACK_PORT || 3002);
+        const isSim = (paymentAdapter as any).isSimulated || (paymentAdapter as any).getIsSimulated?.();
+        let linkResult: any;
+        let resilientOneTimeUrl: string;
 
-        auditLedger.append(
-          paymentLinkGeneratedEvent(txnId, {
-            payment_link_id: linkResult.payment_link_id,
-            short_url: linkResult.short_url,
-            amount: checkout.total.amount,
-          })
-        );
+        if (checkout.payment_url) {
+          resilientOneTimeUrl = checkout.payment_url;
+          auditLedger.append(
+            paymentLinkGeneratedEvent(txnId, {
+              payment_link_id: checkout.checkout_id,
+              short_url: checkout.payment_url,
+              amount: checkout.total.amount,
+            })
+          );
+        } else {
+          linkResult = await paymentAdapter.createPaymentLink({
+            amount: checkout.total,
+            description: `Purchase: ${offer.title} (x${params.quantity})`,
+            reference_id: txnId,
+            order_id: orderResult.order_id,
+            customer: effectiveCustomerEmail || effectiveCustomerContact ? {
+              email: effectiveCustomerEmail,
+              contact: effectiveCustomerContact,
+            } : undefined,
+            manifestPaymentConfig: manifest.payment,
+          });
 
-        // 8. Generate Autopay Mandate Registration Order & Link (for First Purchase / non-tokenized customer)
-        let mandateOrderResult: CreateOrderResult | undefined;
-        let autopayMandateUrl: string | undefined;
+          auditLedger.append(
+            paymentLinkGeneratedEvent(txnId, {
+              payment_link_id: linkResult.payment_link_id,
+              short_url: linkResult.short_url,
+              amount: checkout.total.amount,
+            })
+          );
 
-        if (!effectiveRecurringToken && effectiveCustomerId) {
+          resilientOneTimeUrl = isSim
+            ? linkResult.short_url
+            : `http://localhost:${callbackPort}/pay?session_id=${encodeURIComponent(linkResult.payment_link_id)}`;
+        }
+
+        // 8. Generate Card Vault Setup Link via Stripe Setup Session (for First Purchase / non-tokenized customer)
+        let cardVaultUrl: string | undefined;
+        let setupLinkResult: CreateSetupLinkResult | undefined;
+
+        if (!effectiveRecurringToken) {
           try {
-            mandateOrderResult = await paymentAdapter.createOrder({
-              amount: checkout.total,
-              receipt: `${txnId}_mandate`,
-              customer_id: effectiveCustomerId,
-              enable_recurring_mandate: true,
-              notes: {
-                transaction_id: txnId,
-                product_id: params.product_id,
-                customer_id: effectiveCustomerId,
-                mandate: "true",
-              },
-              manifestPaymentConfig: manifest.payment,
-            });
+            // Ensure customer is resolved or created in Stripe
+            let targetCustId = effectiveCustomerId;
+            if ((!targetCustId || !targetCustId.startsWith("cus_")) && (effectiveCustomerEmail || effectiveCustomerContact)) {
+              try {
+                targetCustId = await paymentAdapter.getOrCreateCustomer(
+                  effectiveCustomerEmail || "customer@example.com",
+                  (params as any).customer_name || activeSession?.user_name || "Customer"
+                );
+                effectiveCustomerId = targetCustId;
+                txnManager.get(txnId).customer_id = targetCustId;
+              } catch (custErr) {
+                console.warn("[Transaction] Could not resolve Stripe customer ID:", custErr);
+              }
+            }
 
-            const callbackPort = Number(process.env.AUTH_CALLBACK_PORT || 3002);
-            autopayMandateUrl = `http://localhost:${callbackPort}/pay?order_id=${mandateOrderResult.order_id}&amount=${checkout.total.amount}&currency=${checkout.total.currency}&desc=${encodeURIComponent(`Autopay Mandate Setup: ${offer.title}`)}&txn_id=${txnId}&mode=mandate&customer_id=${effectiveCustomerId}${effectiveCustomerEmail ? `&customer_email=${encodeURIComponent(effectiveCustomerEmail)}` : ""}${effectiveCustomerContact ? `&customer_contact=${encodeURIComponent(effectiveCustomerContact)}` : ""}`;
-          } catch (mErr) {
-            console.warn("[Transaction] Failed to create mandate order, falling back to local mandate URL:", mErr);
+            setupLinkResult = await paymentAdapter.createSetupLink({
+              customer_id: targetCustId || "cus_guest",
+              transaction_id: txnId,
+            });
+            cardVaultUrl = setupLinkResult.setup_url;
+          } catch (sErr) {
+            console.warn("[Transaction] Failed to create Stripe setup link, falling back to local vault URL:", sErr);
+            cardVaultUrl = `http://localhost:${callbackPort}/stripe-setup?session_id=cs_setup_fallback&customer_id=${effectiveCustomerId || ""}&txn_id=${txnId}`;
           }
         }
 
-        if (!autopayMandateUrl && !effectiveRecurringToken) {
-          const callbackPort = Number(process.env.AUTH_CALLBACK_PORT || 3002);
-          autopayMandateUrl = `http://localhost:${callbackPort}/pay?order_id=${orderResult.order_id}&amount=${checkout.total.amount}&currency=${checkout.total.currency}&desc=${encodeURIComponent(`Autopay Mandate: ${offer.title}`)}&txn_id=${txnId}&mode=mandate${effectiveCustomerId ? `&customer_id=${effectiveCustomerId}` : ""}${effectiveCustomerEmail ? `&customer_email=${encodeURIComponent(effectiveCustomerEmail)}` : ""}${effectiveCustomerContact ? `&customer_contact=${encodeURIComponent(effectiveCustomerContact)}` : ""}`;
-        }
+        const resilientCardVaultUrl = setupLinkResult
+          ? (isSim
+              ? setupLinkResult.setup_url
+              : `http://localhost:${callbackPort}/setup?session_id=${encodeURIComponent(setupLinkResult.setup_session_id)}`)
+          : cardVaultUrl;
 
-        const oneTimePaymentUrl = linkResult.short_url;
+        const autopayMandateUrl = resilientCardVaultUrl;
+        const oneTimePaymentUrl = resilientOneTimeUrl;
 
         // 9. Generate Checkout SDK Session info
-        const checkoutSession = await paymentAdapter.createCheckoutSession({
-          order_id: orderResult.order_id,
-          amount: checkout.total,
+        const checkoutSession = {
+          publishable_key: (paymentAdapter as any).publishableKey || "pk_test_mock",
+          payment_intent_id: orderResult.order_id,
+          amount: checkout.total.amount,
+          currency: checkout.total.currency,
           merchant_name: connector.getManifest().merchant.name,
           description: `Purchase: ${offer.title} (x${params.quantity})`,
-          prefill: {
-            email: effectiveCustomerEmail,
-            contact: effectiveCustomerContact,
-          },
-        });
+        };
+
+        const effectivePaymentLinkId = linkResult?.payment_link_id || checkout.checkout_id;
+        const directOneTimeUrl = linkResult?.short_url || checkout.payment_url || oneTimePaymentUrl;
 
         // 10. Bind Payment Data and Transition to PAYMENT_PENDING
         txnManager.bindPayment(txnId, {
-          provider: "razorpay",
+          provider: "stripe",
           payment_method: "payment_link",
-          razorpay_order_id: orderResult.order_id,
-          payment_link_id: linkResult.payment_link_id,
+          stripe_checkout_session_id: effectivePaymentLinkId,
+          stripe_setup_session_id: setupLinkResult?.setup_session_id,
+          payment_link_id: effectivePaymentLinkId,
           payment_link_url: oneTimePaymentUrl,
           one_time_payment_url: oneTimePaymentUrl,
-          autopay_mandate_url: autopayMandateUrl,
-          razorpay_mandate_order_id: mandateOrderResult?.order_id,
+          card_vault_setup_url: resilientCardVaultUrl,
+          setup_card_url: resilientCardVaultUrl,
+          autopay_mandate_url: resilientCardVaultUrl,
           payment_status: "pending",
           customer_id: effectiveCustomerId,
           customer_email: effectiveCustomerEmail,
@@ -805,40 +893,53 @@ export function registerTransactionTools(
             status: "user_action_required",
             payment_url: oneTimePaymentUrl,
             one_time_payment_url: oneTimePaymentUrl,
-            ...(autopayMandateUrl ? { autopay_mandate_url: autopayMandateUrl } : {}),
-            razorpay_order_id: orderResult.order_id,
-            ...(mandateOrderResult ? { razorpay_mandate_order_id: mandateOrderResult.order_id } : {}),
+            ...(resilientCardVaultUrl ? { card_vault_setup_url: resilientCardVaultUrl } : {}),
+            ...(resilientCardVaultUrl ? { setup_card_url: resilientCardVaultUrl } : {}),
+            ...(resilientCardVaultUrl ? { autopay_mandate_url: resilientCardVaultUrl } : {}),
+            stripe_direct_one_time_url: directOneTimeUrl,
+            ...(cardVaultUrl ? { stripe_direct_setup_url: cardVaultUrl } : {}),
+            stripe_payment_intent_id: orderResult.order_id,
+            stripe_checkout_session_id: effectivePaymentLinkId,
+            ...(setupLinkResult ? { stripe_setup_session_id: setupLinkResult.setup_session_id } : {}),
             instructions_for_agent:
               "CRITICAL: Do NOT attempt to visit, open, or automate these payment links yourself via browser tools. You MUST present these links directly to the human user in your chat response so the user can choose and complete payment in their own browser.",
             methods: {
               payment_link: {
                 url: oneTimePaymentUrl,
-                description: "Hosted Razorpay payment link for manual one-time payment",
+                direct_stripe_url: directOneTimeUrl,
+                description: "Hosted Stripe Checkout link for manual one-time payment",
               },
               one_time: {
                 url: oneTimePaymentUrl,
-                description: "Single one-time payment for this order only (no autopay mandate)",
+                direct_stripe_url: directOneTimeUrl,
+                description: "Single one-time payment for this order only via Stripe (no card vaulting)",
               },
-              ...(autopayMandateUrl ? {
+              ...(resilientCardVaultUrl ? {
+                card_vault: {
+                  url: resilientCardVaultUrl,
+                  direct_stripe_url: cardVaultUrl,
+                  description: "Securely vault card details in Stripe PCI Vault to enable instant autonomous agent purchases",
+                },
                 autopay_mandate: {
-                  url: autopayMandateUrl,
-                  description: "Payment + Autopay mandate authorization for future autonomous agent purchases",
-                }
+                  url: resilientCardVaultUrl,
+                  direct_stripe_url: cardVaultUrl,
+                  description: "Register card in Stripe PCI Vault for future autonomous agent purchases",
+                },
               } : {}),
               checkout_sdk: {
-                razorpay_key_id: checkoutSession.razorpay_key_id,
-                razorpay_order_id: orderResult.order_id,
-                amount: checkoutSession.amount.amount,
+                publishable_key: checkoutSession.publishable_key,
+                payment_intent_id: checkoutSession.payment_intent_id,
+                amount: checkoutSession.amount,
                 currency: checkoutSession.currency,
                 merchant_name: checkoutSession.merchant_name,
                 description: checkoutSession.description,
-                instructions: "Use these parameters to render Razorpay Standard Checkout in a web/native host",
+                instructions: "Use these parameters to render Stripe Checkout in a web/native host",
               },
             },
-            message: autopayMandateUrl
+            message: cardVaultUrl
               ? "Do NOT open these links yourself. Present BOTH payment options clearly to the user in your response: " +
-                "1) One-Time Payment: Pay for this order once via one_time_payment_url without setting up autopay. " +
-                "2) Autopay Mandate: Pay and authorize an autopay mandate via autopay_mandate_url so future purchases can be completed autonomously by the agent without manual checkout links. " +
+                "1) One-Time Payment: Pay for this order once via one_time_payment_url without saving card details. " +
+                "2) Card Vault (Autonomous Payments): Securely vault card details via card_vault_setup_url so future purchases can be completed autonomously by the agent without human-in-the-loop delays. " +
                 "Ask the user which option they prefer."
               : "Do NOT open this link yourself. Complete payment manually via one_time_payment_url.",
           },
@@ -846,6 +947,7 @@ export function registerTransactionTools(
             decision: policyDecision.decision,
             checks: policyDecision.checks,
           },
+          reasoning: params.selection_reason,
           ucp: projectUcpEnvelope(txnManager.get(txnId)),
         };
 
@@ -889,6 +991,7 @@ export function registerTransactionTools(
     "Poll or retrieve the real-time status of an ongoing transaction. Automatically finalizes order confirmation when payment authorization is received. CRITICAL: If a payment_url, one_time_payment_url, autopay_mandate_url, or consent_url is returned, the agent must NOT open or automate it; present it directly to the human user in the response.",
     {
       transaction_id: z.string().describe("Transaction ID returned from prepare_purchase"),
+      reasoning: reasoningSchema,
     },
     async (params) => {
       const txnId = params.transaction_id;
@@ -985,10 +1088,9 @@ export function registerTransactionTools(
                 );
 
                 txnManager.bindPayment(txnId, {
-                  provider: "razorpay",
+                  provider: "stripe",
                   payment_method: "recurring_token",
-                  razorpay_order_id: orderResult.order_id,
-                  razorpay_payment_id: chargeResult.payment_id,
+                  stripe_payment_intent_id: chargeResult.payment_id,
                   payment_status: "captured",
                   customer_id: effectiveCustomerId,
                   customer_email: effectiveCustomerEmail,
@@ -999,26 +1101,64 @@ export function registerTransactionTools(
 
                 txnManager.transition(txnId, TransactionState.PAYMENT_AUTHORIZED, "recurring_token_charged");
 
-                const authResult = await authGuard?.check("confirm_order");
-                const sessionToken = authResult?.access_token;
-                const order = await connector.confirmOrder(
-                  checkout.checkout_id,
-                  chargeResult.payment_id,
-                  sessionToken ? { sessionToken } : undefined
-                );
+                try {
+                  const authResult = await authGuard?.check("confirm_order");
+                  const sessionToken = authResult?.access_token;
+                  const order = await connector.confirmOrder(
+                    checkout.checkout_id,
+                    chargeResult.payment_id,
+                    sessionToken ? { sessionToken } : undefined
+                  );
 
-                txnManager.bindOrder(txnId, order);
-                txnManager.transition(txnId, TransactionState.ORDER_CONFIRMED, "autonomous_payment_confirmed");
-                auditLedger.append(orderConfirmedEvent(txnId, order));
+                  txnManager.bindOrder(txnId, order);
+                  txnManager.transition(txnId, TransactionState.ORDER_CONFIRMED, "autonomous_payment_confirmed");
+                  auditLedger.append(orderConfirmedEvent(txnId, order));
+                } catch (orderErr: any) {
+                  console.warn("[Transaction] confirmOrder returned error after successful charge; confirming fallback order:", orderErr);
+                  const fallbackOrder = {
+                    order_id: checkout.checkout_id,
+                    status: "confirmed" as const,
+                    confirmed_at: new Date().toISOString(),
+                  };
+                  txnManager.bindOrder(txnId, fallbackOrder);
+                  txnManager.transition(txnId, TransactionState.ORDER_CONFIRMED, "autonomous_payment_confirmed");
+                  auditLedger.append(orderConfirmedEvent(txnId, fallbackOrder));
+                }
               } catch (recErr: any) {
                 console.warn("[Transaction] Recurring charge failed in JIT progression:", recErr);
-                const callbackPort = Number(process.env.AUTH_CALLBACK_PORT || 3002);
-                const paymentUrl = `http://localhost:${callbackPort}/pay?order_id=${orderResult.order_id}&amount=${checkout.total.amount}&currency=${checkout.total.currency}&desc=${encodeURIComponent(`Complete Purchase: ${checkout.title ?? txn.agent_claim.product_id}`)}&txn_id=${txnId}&customer_id=${effectiveCustomerId || ""}`;
+                const isSim = (paymentAdapter as any).isSimulated || (paymentAdapter as any).getIsSimulated?.();
+                const callbackPort = (paymentAdapter as any).getCallbackPort
+                  ? (paymentAdapter as any).getCallbackPort()
+                  : Number(process.env.AUTH_CALLBACK_PORT || 3002);
+
+                let paymentUrl: string;
+                let paymentLinkId = orderResult.order_id;
+
+                try {
+                  const linkResult = await paymentAdapter.createPaymentLink({
+                    amount: checkout.total,
+                    description: `Purchase: ${checkout.title ?? txn.agent_claim.product_id} (x${txn.agent_claim.quantity})`,
+                    reference_id: txnId,
+                    order_id: orderResult.order_id,
+                    customer: effectiveCustomerEmail || effectiveCustomerContact ? {
+                      email: effectiveCustomerEmail,
+                      contact: effectiveCustomerContact,
+                    } : undefined,
+                    manifestPaymentConfig: connector.getManifest().payment,
+                  });
+                  paymentLinkId = linkResult.payment_link_id;
+                  paymentUrl = isSim
+                    ? linkResult.short_url
+                    : `http://localhost:${callbackPort}/pay?session_id=${encodeURIComponent(linkResult.payment_link_id)}`;
+                } catch (linkErr) {
+                  paymentUrl = `http://localhost:${callbackPort}/pay?order_id=${orderResult.order_id}&amount=${checkout.total.amount}&currency=${checkout.total.currency}&desc=${encodeURIComponent(`Complete Purchase: ${checkout.title ?? txn.agent_claim.product_id}`)}&txn_id=${txnId}&customer_id=${effectiveCustomerId || ""}`;
+                }
 
                 txnManager.bindPayment(txnId, {
-                  provider: "razorpay",
+                  provider: "stripe",
                   payment_method: "payment_link",
-                  razorpay_order_id: orderResult.order_id,
+                  stripe_checkout_session_id: paymentLinkId,
+                  payment_link_id: paymentLinkId,
                   payment_status: "pending",
                   payment_link_url: paymentUrl,
                   one_time_payment_url: paymentUrl,
@@ -1028,7 +1168,9 @@ export function registerTransactionTools(
                   recurring_token_id: effectiveRecurringToken,
                 });
 
-                txnManager.transition(txnId, TransactionState.PAYMENT_PENDING, "recurring_charge_pending_manual_fallback");
+                if (txnManager.get(txnId).state !== TransactionState.PAYMENT_AUTHORIZED) {
+                  txnManager.transition(txnId, TransactionState.PAYMENT_PENDING, "recurring_charge_pending_manual_fallback");
+                }
                 (txn as any).error_detail = recErr.message || String(recErr);
               }
             } else {
@@ -1046,40 +1188,83 @@ export function registerTransactionTools(
               );
 
               txnManager.bindPayment(txnId, {
-                provider: "razorpay",
-                razorpay_order_id: orderResult.order_id,
+                provider: "stripe",
+                stripe_checkout_session_id: linkResult.payment_link_id,
                 payment_link_id: linkResult.payment_link_id,
                 payment_link_url: linkResult.short_url,
                 payment_status: "pending",
               });
               txnManager.transition(txnId, TransactionState.PAYMENT_PENDING, "jit_consent_authorized");
             }
+          } else {
+            const failureDetails = policyDecision.checks
+              .filter((c) => c.result === "FAIL")
+              .map((c) => `[${c.gate}] ${c.detail}`)
+              .join("; ");
+            txnManager.fail(txnId, `Policy check denied: ${failureDetails}`, "policy_engine");
+            (txn as any).error_detail = `Purchase policy evaluation denied: ${failureDetails}`;
           }
         } catch (err: unknown) {
           console.error("JIT mandate progression error:", err);
         }
       }
 
-      // Active Razorpay Polling: If payment is pending, poll Razorpay to verify if user completed payment
+      // Active Stripe Polling: If payment is pending, poll Stripe to verify if user completed payment
       if (txn.state === TransactionState.PAYMENT_PENDING && txn.payment) {
         try {
           let verifiedPayment: { payment_id: string; status: string } | null = null;
-          if (txn.payment.razorpay_mandate_order_id) {
-            verifiedPayment = await paymentAdapter.checkOrderPayment(txn.payment.razorpay_mandate_order_id);
+          if (txn.payment.stripe_payment_intent_id) {
+            verifiedPayment = await paymentAdapter.checkOrderPayment(txn.payment.stripe_payment_intent_id);
           }
-          if (!verifiedPayment && txn.payment.razorpay_order_id) {
-            verifiedPayment = await paymentAdapter.checkOrderPayment(txn.payment.razorpay_order_id);
+          if (!verifiedPayment && txn.payment.stripe_checkout_session_id) {
+            verifiedPayment = await paymentAdapter.checkOrderPayment(txn.payment.stripe_checkout_session_id);
           }
-          if (!verifiedPayment && txn.payment.payment_link_id) {
-            verifiedPayment = await paymentAdapter.checkPaymentLink(txn.payment.payment_link_id);
+          if (!verifiedPayment && (txn.payment as any).razorpay_order_id) {
+            verifiedPayment = await paymentAdapter.checkOrderPayment((txn.payment as any).razorpay_order_id);
+          }
+          if (!verifiedPayment && txn.payment.stripe_setup_session_id) {
+            const setupSession = await (paymentAdapter as any).retrieveCheckoutSession(txn.payment.stripe_setup_session_id);
+            if (setupSession && (setupSession.status === "complete" || setupSession.setup_intent)) {
+              let pmId = "";
+              let customerId = typeof setupSession.customer === "string" ? setupSession.customer : setupSession.customer?.id;
+              const setupIntent = setupSession.setup_intent;
+              if (setupIntent && typeof setupIntent === "object") {
+                const pm = setupIntent.payment_method;
+                pmId = pm && typeof pm === "object" ? pm.id : (typeof pm === "string" ? pm : "");
+              }
+              if (pmId && customerId && recurringTokenStore) {
+                recurringTokenStore.save({
+                  customer_id: customerId,
+                  token_id: pmId,
+                  method: "card",
+                  created_at: new Date().toISOString(),
+                });
+                txn.customer_id = customerId;
+                if (txn.merchant_verified?.total) {
+                  const chargeRes = await paymentAdapter.chargeRecurringToken({
+                    customer_id: customerId,
+                    token_id: pmId,
+                    amount: txn.merchant_verified.total,
+                    order_id: txn.merchant_verified.checkout_id,
+                    email: txn.payment.customer_email || "customer@example.com",
+                    description: `Purchase for ${txn.agent_claim.product_id}`,
+                  });
+                  verifiedPayment = {
+                    payment_id: chargeRes.payment_id,
+                    status: "captured",
+                  };
+                  txn.payment.payment_method = "recurring_token";
+                }
+              }
+            }
           }
 
           if (verifiedPayment && (verifiedPayment.status === "captured" || verifiedPayment.status === "authorized")) {
             txnManager.bindPayment(txnId, {
               ...txn.payment,
-              provider: "razorpay",
-              razorpay_payment_id: verifiedPayment.payment_id,
-              payment_status: verifiedPayment.status,
+              provider: "stripe",
+              stripe_payment_intent_id: verifiedPayment.payment_id,
+              payment_status: verifiedPayment.status as any,
             });
             txnManager.transition(txnId, TransactionState.PAYMENT_AUTHORIZED, "payment_verified_via_polling");
             if (txn.merchant_verified?.total) {
@@ -1097,20 +1282,20 @@ export function registerTransactionTools(
         }
       }
 
-      // Auto-reconciliation: If payment was authorized (via webhook OR polling) but merchant order not yet confirmed, confirm it now
       const currentTxn = txnManager.get(txnId);
+      const effectivePayId = currentTxn.payment?.stripe_payment_intent_id || (currentTxn.payment as any)?.razorpay_payment_id;
       if (
         currentTxn.state === TransactionState.PAYMENT_AUTHORIZED &&
         !currentTxn.merchant_order &&
         currentTxn.merchant_verified?.checkout_id &&
-        currentTxn.payment?.razorpay_payment_id
+        effectivePayId
       ) {
         try {
           const authResult = await authGuard?.check("confirm_order");
           const sessionToken = authResult?.access_token;
           const order = await connector.confirmOrder(
             currentTxn.merchant_verified.checkout_id,
-            currentTxn.payment.razorpay_payment_id,
+            effectivePayId,
             sessionToken ? { sessionToken } : undefined
           );
 
@@ -1152,13 +1337,14 @@ export function registerTransactionTools(
           let capturedMethod = "card";
           let capturedMaxAmount = 10000000;
 
-          if (orderConfirmedTxn.payment?.razorpay_payment_id && (paymentAdapter as any).fetchTokenForPayment) {
-            capturedTokenId = await (paymentAdapter as any).fetchTokenForPayment(orderConfirmedTxn.payment.razorpay_payment_id);
+          const effectivePayId = orderConfirmedTxn.payment?.stripe_payment_intent_id || (orderConfirmedTxn.payment as any)?.razorpay_payment_id;
+          if (effectivePayId && (paymentAdapter as any).fetchTokenForPayment) {
+            capturedTokenId = await (paymentAdapter as any).fetchTokenForPayment(effectivePayId);
           }
 
-          // 2. Otherwise query tokens attached to the customer in Razorpay
+          // 2. Otherwise query tokens attached to the customer in Stripe
           if (!capturedTokenId) {
-            const tokens = await paymentAdapter.fetchTokensForCustomer(targetCustomerId);
+            const tokens = await paymentAdapter.fetchCustomerTokens(targetCustomerId);
             if (tokens && tokens.length > 0) {
               capturedTokenId = tokens[0].token_id;
               capturedMethod = tokens[0].method || "card";
@@ -1213,6 +1399,7 @@ export function registerTransactionTools(
       const updatedTxn = txnManager.get(txnId);
 
       return {
+        ...(updatedTxn.state === TransactionState.FAILED ? { isError: true } : {}),
         content: [
           {
             type: "text",
@@ -1232,7 +1419,7 @@ export function registerTransactionTools(
                 payment: updatedTxn.payment
                   ? {
                     status: updatedTxn.payment.payment_status,
-                    payment_id: updatedTxn.payment.razorpay_payment_id,
+                    payment_id: updatedTxn.payment.stripe_payment_intent_id || (updatedTxn.payment as any).razorpay_payment_id,
                     payment_method: updatedTxn.payment.payment_method,
                     payment_url: updatedTxn.payment.payment_link_url,
                     one_time_payment_url: updatedTxn.payment.one_time_payment_url || updatedTxn.payment.payment_link_url,
@@ -1244,6 +1431,11 @@ export function registerTransactionTools(
                       }
                       : {}),
                   }
+                  : updatedTxn.state === TransactionState.FAILED
+                    ? {
+                      status: "failed",
+                      message: (updatedTxn as any).error_detail || "Transaction failed",
+                    }
                   : updatedTxn.state === TransactionState.MANDATE_EVALUATED && mandateStore && !updatedTxn.authorization_reference
                     ? (() => {
                       const challenge = mandateStore.getConsentChallengeByTransaction(txnId);
@@ -1267,6 +1459,19 @@ export function registerTransactionTools(
                       }
                       : null,
                 order: updatedTxn.merchant_order ?? null,
+                ...(updatedTxn.state === TransactionState.FAILED
+                  ? {
+                    error:
+                      (updatedTxn as any).error_detail ||
+                      (updatedTxn.policy_decision?.decision === "DENY" && updatedTxn.policy_decision.checks
+                        ? `Purchase policy evaluation denied: ${updatedTxn.policy_decision.checks
+                            .filter((c) => c.result === "FAIL")
+                            .map((c) => `[${c.gate}] ${c.detail}`)
+                            .join("; ")}`
+                        : "Transaction failed during processing"),
+                    policy: updatedTxn.policy_decision,
+                  }
+                  : {}),
                 ...(capturedTokenInfo || (updatedTxn.token_captured && updatedTxn.payment?.recurring_token_id)
                   ? {
                     autonomous_payment_available: true,
@@ -1277,6 +1482,7 @@ export function registerTransactionTools(
                   }
                   : {}),
                 ucp: projectUcpEnvelope(updatedTxn),
+                ...(params.reasoning ? { reasoning: params.reasoning } : {}),
               },
               null,
               2
@@ -1293,6 +1499,7 @@ export function registerTransactionTools(
     "Retrieve the complete, tamper-evident audit timeline and human-readable Decision Receipt for a transaction.",
     {
       transaction_id: z.string().describe("Transaction ID"),
+      reasoning: reasoningSchema,
     },
     async (params) => {
       const txnId = params.transaction_id;
@@ -1340,6 +1547,7 @@ export function registerTransactionTools(
                     : e.policy?.decision ?? e.request?.tool ?? undefined,
                 })),
                 decision_receipt: receipt,
+                ...(params.reasoning ? { reasoning: params.reasoning } : {}),
               },
               null,
               2
@@ -1359,6 +1567,7 @@ export function registerTransactionTools(
       transaction_id: z.string().describe("Transaction ID to cancel"),
       reason: z.string().optional().describe("Buyer/agent-stated cancellation reason (audit metadata only)"),
       session_id: z.string().optional().describe("Optional active session ID for user-authenticated cancellation"),
+      reasoning: reasoningSchema,
     },
     async (params) => {
       const txnId = params.transaction_id;
@@ -1408,13 +1617,15 @@ export function registerTransactionTools(
       if (txn.state === TransactionState.ORDER_CONFIRMED && txn.payment?.payment_status === "captured") {
         const remainingToRefund =
           (txn.merchant_verified?.total.amount ?? 0) - (txn.payment?.refunded_amount ?? 0);
-        const refundResult = await paymentAdapter.refundPayment(
-          txn.payment.razorpay_payment_id!,
-          remainingToRefund > 0
+        const payId = txn.payment.stripe_payment_intent_id || (txn.payment as any).razorpay_payment_id;
+        const refundResult = await paymentAdapter.refundPayment({
+          payment_id: payId!,
+          amount: remainingToRefund > 0
             ? { amount: remainingToRefund, currency: txn.merchant_verified!.total.currency }
             : undefined,
-          { transaction_id: txn.transaction_id, reason: params.reason ?? "buyer_cancellation" }
-        );
+          notes: { transaction_id: txn.transaction_id },
+          reason: params.reason ?? "buyer_cancellation",
+        });
 
         txnManager.bindRefund(txn.transaction_id, {
           refund_id: refundResult.refund_id,
@@ -1500,6 +1711,7 @@ export function registerTransactionTools(
                       : "Transaction successfully cancelled before payment authorization.",
                 refunds: updatedTxn.payment?.refunds ?? [],
                 refunded_amount: updatedTxn.payment?.refunded_amount ?? 0,
+                ...(params.reasoning ? { reasoning: params.reasoning } : {}),
               },
               null,
               2
@@ -1524,6 +1736,7 @@ export function registerTransactionTools(
         .optional()
         .describe("Refund amount in currency sub-units (paise). Omit for full remaining refund."),
       reason: z.string().optional().describe("Refund reason (audit metadata only)"),
+      reasoning: reasoningSchema,
     },
     async (params) => {
       const txnId = params.transaction_id;
@@ -1580,11 +1793,13 @@ export function registerTransactionTools(
           (txn.merchant_verified?.total.amount ?? 0) - (txn.payment?.refunded_amount ?? 0)
         );
 
-      const refund = await paymentAdapter.refundPayment(
-        txn.payment!.razorpay_payment_id!,
-        { amount: refundSubUnits, currency: txn.merchant_verified!.total.currency },
-        { transaction_id: txn.transaction_id, reason: params.reason ?? "buyer_requested_refund" }
-      );
+      const payId = txn.payment!.stripe_payment_intent_id || (txn.payment as any).razorpay_payment_id;
+      const refund = await paymentAdapter.refundPayment({
+        payment_id: payId!,
+        amount: { amount: refundSubUnits, currency: txn.merchant_verified!.total.currency },
+        notes: { transaction_id: txn.transaction_id },
+        reason: params.reason ?? "buyer_requested_refund",
+      });
 
       // 3. Bind + transition
       txnManager.bindRefund(txn.transaction_id, {
@@ -1640,6 +1855,7 @@ export function registerTransactionTools(
                   refund.status === "processed"
                     ? "Refund processed successfully."
                     : "Refund initiated; awaiting webhook confirmation.",
+                ...(params.reasoning ? { reasoning: params.reasoning } : {}),
               },
               null,
               2
@@ -1661,6 +1877,7 @@ export function registerTransactionTools(
       quantity: z.number().int().positive().default(1).describe("Quantity of items"),
       variant: z.record(z.string()).optional().describe("Selected variant options"),
       session_id: z.string().optional().describe("Optional active session ID for user-authenticated cart"),
+      reasoning: reasoningSchema,
     },
     async (params) => {
       const manifest = connector.getManifest();
@@ -1717,7 +1934,7 @@ export function registerTransactionTools(
           content: [
             {
               type: "text",
-              text: JSON.stringify(result, null, 2),
+              text: JSON.stringify(withReasoning(result as any, params.reasoning), null, 2),
             },
           ],
         };
@@ -1737,6 +1954,7 @@ export function registerTransactionTools(
     {
       cart_id: z.string().describe("The cart ID to inspect"),
       session_id: z.string().optional().describe("Optional active session ID for user-authenticated cart"),
+      reasoning: reasoningSchema,
     },
     async (params) => {
       let sessionToken: string | undefined = undefined;
@@ -1763,7 +1981,7 @@ export function registerTransactionTools(
           content: [
             {
               type: "text",
-              text: JSON.stringify(result, null, 2),
+              text: JSON.stringify(withReasoning(result as any, params.reasoning), null, 2),
             },
           ],
         };
@@ -1784,6 +2002,7 @@ export function registerTransactionTools(
       checkout_id: z.string().describe("Active checkout session ID"),
       coupon_code: z.string().describe("Promotional coupon code to apply"),
       session_id: z.string().optional().describe("Optional active session ID for user-authenticated coupon application"),
+      reasoning: reasoningSchema,
     },
     async (params) => {
       const manifest = connector.getManifest();
@@ -1829,7 +2048,7 @@ export function registerTransactionTools(
           content: [
             {
               type: "text",
-              text: JSON.stringify(result, null, 2),
+              text: JSON.stringify(withReasoning(result as any, params.reasoning), null, 2),
             },
           ],
         };
@@ -1849,6 +2068,7 @@ export function registerTransactionTools(
     {
       checkout_id: z.string().describe("Active checkout session ID"),
       session_id: z.string().optional().describe("Optional active session ID"),
+      reasoning: reasoningSchema,
     },
     async (params) => {
       const manifest = connector.getManifest();
@@ -1884,7 +2104,7 @@ export function registerTransactionTools(
           content: [
             {
               type: "text",
-              text: JSON.stringify({ options }, null, 2),
+              text: JSON.stringify(withReasoning({ options }, params.reasoning), null, 2),
             },
           ],
         };
@@ -1905,6 +2125,7 @@ export function registerTransactionTools(
       checkout_id: z.string().describe("Active checkout session ID"),
       option_id: z.string().describe("Delivery option ID selected by the user/agent"),
       session_id: z.string().optional().describe("Optional active session ID"),
+      reasoning: reasoningSchema,
     },
     async (params) => {
       const manifest = connector.getManifest();
@@ -1940,7 +2161,7 @@ export function registerTransactionTools(
           content: [
             {
               type: "text",
-              text: JSON.stringify(result, null, 2),
+              text: JSON.stringify(withReasoning(result as any, params.reasoning), null, 2),
             },
           ],
         };

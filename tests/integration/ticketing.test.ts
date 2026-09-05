@@ -77,7 +77,7 @@ describe("TicketVerse Non-Retail Cinema Ticketing E2E Lifecycle", () => {
     // 2. Refund flow
     const refund = await agent.requestRefund(purchase.transaction_id, undefined, "User cancellation");
     expect(refund.state).toBe(TransactionState.REFUNDED);
-    expect(refund.refund_id).toMatch(/^rfnd_/);
+    expect(refund.refund_id).toMatch(/^(re|rfnd)_/);
     expect(refund.refunded_amount).toBe(85000);
 
     // 3. Verify final audit chain & Decision Receipt

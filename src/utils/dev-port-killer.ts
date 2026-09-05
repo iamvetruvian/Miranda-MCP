@@ -209,6 +209,18 @@ export function listenWithPortRecovery(
         console.error(`[MerchantMCP-DevPortKiller] Server error on port ${port}:`, err);
       }
     });
+  } else {
+    // Without recovery, a failed bind must not crash the whole MCP stdio server:
+    // another instance (e.g. from a concurrent session) may already own the port.
+    server.on("error", (err: any) => {
+      if (err && err.code === "EADDRINUSE") {
+        console.error(
+          `[MerchantMCP-DevPortKiller] Port ${port} already in use; continuing without owning this listener (another instance is serving it).`
+        );
+      } else {
+        console.error(`[MerchantMCP-DevPortKiller] Server error on port ${port}:`, err);
+      }
+    });
   }
 
   return server;

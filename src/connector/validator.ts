@@ -86,6 +86,7 @@ export const CheckoutResponseSchema = z.object({
   total: MoneySchema,
   available: z.boolean(),
   expires_at: z.string().optional(),
+  payment_url: z.string().optional(),
 });
 
 export const OrderConfirmationSchema = z.object({

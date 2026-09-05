@@ -4,13 +4,16 @@ import { ConnectorRuntime } from "../../src/connector/runtime.js";
 import { registerTransactionTools } from "../../src/tools/transaction.js";
 import { TransactionManager } from "../../src/transaction/manager.js";
 import { PolicyEngine } from "../../src/policy/engine.js";
-import { RazorpayAdapter } from "../../src/payment/razorpay.js";
+import { StripeAdapter } from "../../src/payment/stripe.js";
 import { AuditLedger } from "../../src/audit/ledger.js";
 import { IntegrationManifest } from "../../src/types/manifest.js";
 import { RecurringTokenStore } from "../../src/payment/token-store.js";
 import { MandateStore } from "../../src/authz/mandate-store.js";
 import { InMemoryStore } from "../../src/persistence/store.js";
 import { AuditEventType, TransactionState } from "../../src/types/index.js";
+import { generateEcKeyPair, signJws } from "../../src/authz/crypto.js";
+import { SessionStore } from "../../src/auth/session-store.js";
+import { AuthGuard } from "../../src/auth/auth-guard.js";
 
 function createMockServer() {
   const tools = new Map<string, { description: string; schema: any; handler: Function }>();
@@ -27,10 +30,12 @@ describe("Phase 4: Autonomous Payment Path (Path 2)", () => {
   let connector: ConnectorRuntime;
   let txnManager: TransactionManager;
   let policyEngine: PolicyEngine;
-  let paymentAdapter: RazorpayAdapter;
+  let paymentAdapter: StripeAdapter;
   let auditLedger: AuditLedger;
   let tokenStore: RecurringTokenStore;
   let mandateStore: MandateStore;
+  let sessionStore: SessionStore;
+  let authGuard: AuthGuard;
   let persistenceStore: InMemoryStore;
   let tools: Map<string, { description: string; schema: any; handler: Function }>;
 
@@ -55,9 +60,8 @@ describe("Phase 4: Autonomous Payment Path (Path 2)", () => {
       order: { order_id: { from: "$.id" }, status: { from: "$.status" } },
     },
     payment: {
-      provider: "razorpay",
-      razorpay_key_id_env: "RAZORPAY_KEY_ID",
-      razorpay_key_secret_env: "RAZORPAY_KEY_SECRET",
+      provider: "stripe",
+      stripe_secret_key_env: "STRIPE_SECRET_KEY",
     },
   };
 
@@ -68,8 +72,10 @@ describe("Phase 4: Autonomous Payment Path (Path 2)", () => {
     txnManager = new TransactionManager(auditLedger);
     mandateStore = new MandateStore(persistenceStore, "test_signing_secret_12345", "mandate");
     policyEngine = new PolicyEngine(undefined, undefined, undefined, persistenceStore, mandateStore);
-    paymentAdapter = new RazorpayAdapter("mock_key", "mock_secret", true);
-    tokenStore = new RecurringTokenStore();
+    paymentAdapter = new StripeAdapter("mock_key", undefined, true);
+    sessionStore = new SessionStore(persistenceStore, 3600, "techbazaar");
+    authGuard = new AuthGuard(manifest, null, sessionStore);
+    tokenStore = new RecurringTokenStore(persistenceStore, "techbazaar");
 
     // Mock connector
     vi.spyOn(connector, "getProduct").mockResolvedValue({
@@ -117,7 +123,7 @@ describe("Phase 4: Autonomous Payment Path (Path 2)", () => {
       paymentAdapter,
       auditLedger,
       mandateStore,
-      undefined,
+      authGuard,
       tokenStore
     );
   });
@@ -155,7 +161,7 @@ describe("Phase 4: Autonomous Payment Path (Path 2)", () => {
     expect(payload.state).toBe(TransactionState.ORDER_CONFIRMED);
     expect(payload.payment.status).toBe("payment_completed");
     expect(payload.payment.payment_method).toBe("recurring_token");
-    expect(payload.payment.payment_id).toMatch(/^pay_rec_sim_/);
+    expect(payload.payment.payment_id).toMatch(/^(pi_off|pay_rec)_sim_/);
     expect(payload.order.order_id).toBe("ORD-AIRPODS-777");
     expect(payload.order.status).toBe("confirmed");
 
@@ -233,7 +239,7 @@ describe("Phase 4: Autonomous Payment Path (Path 2)", () => {
     // 3. State should fall back to PAYMENT_PENDING with payment link
     expect(payload.state).toBe(TransactionState.PAYMENT_PENDING);
     expect(payload.payment.status).toBe("user_action_required");
-    expect(payload.payment.payment_url).toContain("https://rzp.io/i/sim_");
+    expect(payload.payment.payment_url).toContain("http://localhost:");
 
     // 4. Audit ledger should record RECURRING_PAYMENT_FAILED
     const auditEvents = auditLedger.getTransactionAudit(payload.transaction_id);
@@ -300,7 +306,14 @@ describe("Phase 4: Autonomous Payment Path (Path 2)", () => {
   });
 
   it("should advertise ONLY autonomous consent path even when agent passes NO customer_id or customer_email on second purchase", async () => {
-    // 1. Save recurring token for customer in tokenStore
+    // 1. Establish active user session for customer on the MCP server
+    sessionStore.completeSession(
+      "sess_active_user_999",
+      { access_token: "tok_active_999" },
+      { customer_id: "cust_active_user_999", user_email: "buyer@proshop.local" }
+    );
+
+    // 2. Save recurring token for customer in tokenStore
     tokenStore.save({
       customer_id: "cust_active_user_999",
       token_id: "token_user_999",
@@ -379,5 +392,111 @@ describe("Phase 4: Autonomous Payment Path (Path 2)", () => {
     expect(statusPayload.payment.status).toBe("captured");
     expect(statusPayload.payment.payment_link_url).toBeUndefined();
     expect(statusPayload.order).toBeDefined();
+  });
+
+  it("should charge recurring token autonomously when JIT mandate is authorized with Web Crypto signature and status is polled", async () => {
+    // 1. Setup recurring token in tokenStore
+    tokenStore.save({
+      customer_id: "cust_webcrypto_user",
+      token_id: "token_webcrypto_456",
+      method: "card",
+      email: "webcrypto@proshop.local",
+      created_at: new Date().toISOString(),
+    });
+
+    const prepareTool = tools.get("prepare_purchase");
+    const statusTool = tools.get("get_transaction_status");
+
+    // 2. Prepare purchase returns consent_required
+    const prepRes = await prepareTool!.handler({
+      product_id: "AIRPODS-PRO",
+      quantity: 1,
+      selection_reason: "Web Crypto JIT autonomous test",
+      customer_id: "cust_webcrypto_user",
+    });
+
+    const prepPayload = JSON.parse(prepRes.content[0].text);
+    expect(prepPayload.state).toBe(TransactionState.MANDATE_EVALUATED);
+    expect(prepPayload.payment.status).toBe("consent_required");
+    const challengeId = prepPayload.payment.challenge_id;
+    const txnId = prepPayload.transaction_id;
+
+    // 3. Simulate browser Web Crypto signing
+    const userKeyPair = generateEcKeyPair("browser-client-key");
+    const clientJws = signJws(
+      {
+        challenge_id: challengeId,
+        transaction_id: txnId,
+        approved: true,
+        timestamp: Date.now(),
+      },
+      userKeyPair.privateKey,
+      { kid: "browser-client-key" }
+    );
+
+    // 4. User approves mandate on the hosted consent screen with Web Crypto JWS
+    const confirmResult = await mandateStore.confirmConsentChallenge(challengeId, "TechBazaar", {
+      userJws: clientJws,
+      userJwk: userKeyPair.publicJwk,
+    });
+    expect(confirmResult.status).toBe("authorized");
+
+    // Bind authorization reference to transaction
+    const txn = txnManager.get(txnId);
+    txn.authorization_reference = (confirmResult as any).authorization_reference;
+
+    // 5. Agent polls get_transaction_status
+    const statusRes = await statusTool!.handler({
+      transaction_id: txnId,
+    });
+
+    const statusPayload = JSON.parse(statusRes.content[0].text);
+
+    // 6. Must transition directly to ORDER_CONFIRMED without cryptographic verification failure
+    expect(statusPayload.state).toBe(TransactionState.ORDER_CONFIRMED);
+    expect(statusPayload.payment.payment_method).toBe("recurring_token");
+    expect(statusPayload.payment.status).toBe("captured");
+    expect(statusPayload.order).toBeDefined();
+  });
+
+  it("should fail transaction and return failure error when policy denies during JIT status polling", async () => {
+    tokenStore.save({
+      customer_id: "cust_policy_fail",
+      token_id: "token_fail_123",
+      method: "card",
+      email: "fail@proshop.local",
+      created_at: new Date().toISOString(),
+    });
+
+    const prepareTool = tools.get("prepare_purchase");
+    const statusTool = tools.get("get_transaction_status");
+
+    const prepRes = await prepareTool!.handler({
+      product_id: "AIRPODS-PRO",
+      quantity: 1,
+      selection_reason: "Policy denial test",
+      customer_id: "cust_policy_fail",
+    });
+
+    const prepPayload = JSON.parse(prepRes.content[0].text);
+    const txnId = prepPayload.transaction_id;
+
+    // Set an invalid authorization reference to trigger a MandateGate policy denial
+    const txn = txnManager.get(txnId);
+    txn.authorization_reference = "man_nonexistent_reference_999";
+
+    // Agent polls get_transaction_status
+    const statusRes = await statusTool!.handler({
+      transaction_id: txnId,
+    });
+
+    expect(statusRes.isError).toBe(true);
+    const statusPayload = JSON.parse(statusRes.content[0].text);
+
+    // Must transition to FAILED and report the failure instead of hanging in consent_approved
+    expect(statusPayload.state).toBe(TransactionState.FAILED);
+    expect(statusPayload.error).toContain("MandateGate");
+    expect(statusPayload.error).toContain("not found");
+    expect(statusPayload.policy.decision).toBe("DENY");
   });
 });

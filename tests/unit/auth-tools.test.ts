@@ -15,7 +15,7 @@ import { InMemoryStore } from "../../src/persistence/store.js";
 import { ConnectorRuntime } from "../../src/connector/runtime.js";
 import { TransactionManager } from "../../src/transaction/manager.js";
 import { PolicyEngine } from "../../src/policy/engine.js";
-import { RazorpayAdapter } from "../../src/payment/razorpay.js";
+import { StripeAdapter } from "../../src/payment/stripe.js";
 import { AuditLedger } from "../../src/audit/ledger.js";
 import { IntegrationManifest } from "../../src/types/manifest.js";
 
@@ -87,9 +87,8 @@ describe("Auth Tools & Tool Layer Integration", () => {
       },
     },
     payment: {
-      provider: "razorpay",
-      razorpay_key_id_env: "RAZORPAY_KEY_ID",
-      razorpay_key_secret_env: "RAZORPAY_KEY_SECRET",
+      provider: "stripe",
+      stripe_secret_key_env: "STRIPE_SECRET_KEY",
     },
   };
 
@@ -100,7 +99,7 @@ describe("Auth Tools & Tool Layer Integration", () => {
   let connector: ConnectorRuntime;
   let txnManager: TransactionManager;
   let policyEngine: PolicyEngine;
-  let paymentAdapter: RazorpayAdapter;
+  let paymentAdapter: StripeAdapter;
   let auditLedger: AuditLedger;
 
   beforeEach(() => {
@@ -114,7 +113,7 @@ describe("Auth Tools & Tool Layer Integration", () => {
     auditLedger = new AuditLedger();
     txnManager = new TransactionManager(auditLedger, memoryStore);
     policyEngine = new PolicyEngine([], 50000);
-    paymentAdapter = new RazorpayAdapter("rzp_test_123", "rzp_secret_456", true);
+    paymentAdapter = new StripeAdapter("sk_test_123", "pk_test_456", true);
 
     registerAuthTools(server, sessionStore, authGuard, sampleManifest, oauth2Handler, auditLedger);
     registerTransactionTools(

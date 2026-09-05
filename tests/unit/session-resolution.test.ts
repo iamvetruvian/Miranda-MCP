@@ -4,7 +4,7 @@ import { registerTransactionTools } from "../../src/tools/transaction.js";
 import { TransactionManager } from "../../src/transaction/manager.js";
 import { InMemoryStore } from "../../src/persistence/store.js";
 import { ConnectorRuntime } from "../../src/connector/runtime.js";
-import { RazorpayAdapter } from "../../src/payment/razorpay.js";
+import { StripeAdapter } from "../../src/payment/stripe.js";
 import { RecurringTokenStore } from "../../src/payment/token-store.js";
 import { MandateStore } from "../../src/authz/mandate-store.js";
 import { SessionStore } from "../../src/auth/session-store.js";
@@ -19,7 +19,7 @@ describe("Authoritative Session-Based Customer Identity & Autonomous AP2 Flow", 
   let txnManager: TransactionManager;
   let store: InMemoryStore;
   let connector: ConnectorRuntime;
-  let paymentAdapter: RazorpayAdapter;
+  let paymentAdapter: StripeAdapter;
   let tokenStore: RecurringTokenStore;
   let mandateStore: MandateStore;
   let sessionStore: SessionStore;
@@ -56,12 +56,10 @@ describe("Authoritative Session-Based Customer Identity & Autonomous AP2 Flow", 
       },
     },
     payment: {
-      gateway: "razorpay",
-      key_id_env: "RAZORPAY_KEY_ID",
-      key_secret_env: "RAZORPAY_KEY_SECRET",
-      supported_methods: ["card", "upi"],
-      currency: "INR",
-    },
+      provider: "stripe",
+      stripe_secret_key_env: "STRIPE_SECRET_KEY",
+      allowed_methods: { methods: ["card"] },
+    } as any,
     auth: {
       oauth2_user: {
         authorization_url: "http://localhost:5000/oauth/authorize",
@@ -117,7 +115,7 @@ describe("Authoritative Session-Based Customer Identity & Autonomous AP2 Flow", 
     });
 
     const policyEngine = new PolicyEngine(undefined, undefined, undefined, store, mandateStore);
-    paymentAdapter = new RazorpayAdapter("mock_key", "mock_secret", true);
+    paymentAdapter = new StripeAdapter("mock_key", undefined, true);
     tokenStore = new RecurringTokenStore();
     mandateStore = new MandateStore(store, "secret", "mandate");
     sessionStore = new SessionStore(store, 86400);
@@ -181,10 +179,9 @@ describe("Authoritative Session-Based Customer Identity & Autonomous AP2 Flow", 
 
     // Simulate payment capture on the mandate order
     txnManager.bindPayment(payload1.transaction_id, {
-      provider: "razorpay",
+      provider: "stripe",
       ...txn1.payment,
-      razorpay_payment_id: "pay_alice_mandate_456",
-      razorpay_order_id: payload1.payment.razorpay_order_id,
+      stripe_payment_intent_id: "pay_alice_mandate_456",
       payment_status: "captured",
     });
     txnManager.transition(payload1.transaction_id, TransactionState.PAYMENT_AUTHORIZED, "test_authorized");

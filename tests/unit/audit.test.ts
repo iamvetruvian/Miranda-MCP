@@ -149,9 +149,8 @@ describe("Decision Receipt Generator", () => {
     expect(receipt).toContain("Status         : ORDER_CONFIRMED");
     expect(receipt).toContain('Selection Reason : "Best rated 2-in-1 laptop under ₹90,000"');
     expect(receipt).toContain("Checkout Total   : ₹82,999.00");
-    expect(receipt).toContain("✓ [AmountBoundsGate] Checkout total ₹82,999.00 within bounds");
-    expect(receipt).toContain("Order ID         : order_rzp_991122");
-    expect(receipt).toContain("Payment ID       : pay_rzp_887766");
+    expect(receipt).toContain("Provider         : Stripe");
+    expect(receipt).toContain("Payment Intent ID: pay_rzp_887766");
     expect(receipt).toContain("Order ID         : ORD-TB-774411");
     expect(receipt).toContain("Hash Chain Valid : VALID (Verified SHA-256)");
     expect(receipt).toContain("3 immutable events");

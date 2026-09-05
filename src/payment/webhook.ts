@@ -62,8 +62,12 @@ export function processWebhookEvent(
   txnManager: TransactionManager,
   auditLedger: AuditLedger
 ): WebhookProcessResult {
-  const eventType = String(eventBody.event ?? "");
+  const eventType = String(eventBody.type ?? eventBody.event ?? "");
   const payload = (eventBody.payload as Record<string, unknown>) ?? {};
+
+  // Extract reference_id from Stripe object or Razorpay payload
+  const stripeData = (eventBody.data as Record<string, unknown>)?.object as Record<string, unknown> | undefined;
+  const stripeMeta = stripeData?.metadata as Record<string, unknown> | undefined;
 
   // Extract reference_id (our transaction_id) from payment_link, order, payment, or refund entity
   const paymentLinkEntity = (payload.payment_link as Record<string, unknown>)?.entity as Record<string, unknown> | undefined;
@@ -74,6 +78,9 @@ export function processWebhookEvent(
   const refundNotes = refundEntity?.notes as Record<string, unknown> | undefined;
 
   const referenceId = (
+    stripeData?.client_reference_id ??
+    stripeMeta?.transaction_id ??
+    stripeMeta?.ref ??
     paymentLinkEntity?.reference_id ??
     orderEntity?.receipt ??
     paymentNotes?.transaction_id ??
@@ -104,21 +111,23 @@ export function processWebhookEvent(
   const isPaymentPaidEvent =
     eventType === "payment_link.paid" ||
     eventType === "order.paid" ||
-    eventType === "payment.captured";
+    eventType === "payment.captured" ||
+    eventType === "checkout.session.completed" ||
+    eventType === "payment_intent.succeeded" ||
+    eventType === "charge.succeeded";
 
   if (isPaymentPaidEvent) {
     const txn = txnManager.get(referenceId);
 
     // Extract payment ID and captured amount
-    const paymentId = (paymentEntity?.id ?? paymentLinkEntity?.payment_id ?? `pay_wh_${crypto.randomUUID().slice(0, 10)}`) as string;
+    const paymentId = (paymentEntity?.id ?? paymentLinkEntity?.payment_id ?? `pi_wh_${crypto.randomUUID().slice(0, 10)}`) as string;
     const amountPaise = Number(paymentEntity?.amount ?? paymentLinkEntity?.amount ?? txn.merchant_verified?.total.amount ?? 0);
     const currency = String(paymentEntity?.currency ?? txn.merchant_verified?.total.currency ?? "INR");
 
     // Bind payment data to transaction
     txnManager.bindPayment(referenceId, {
-      provider: "razorpay",
-      razorpay_payment_id: paymentId,
-      razorpay_order_id: (orderEntity?.id ?? paymentEntity?.order_id ?? txn.payment?.razorpay_order_id) as string | undefined,
+      provider: "stripe",
+      stripe_payment_intent_id: paymentId,
       payment_status: "captured",
     });
 
@@ -127,7 +136,7 @@ export function processWebhookEvent(
       txnManager.transition(
         referenceId,
         TransactionState.PAYMENT_AUTHORIZED,
-        `razorpay_webhook:${eventType}`
+        `stripe_webhook:${eventType}`
       );
     }
 
@@ -213,21 +222,24 @@ export function createWebhookApp(
     })
   );
 
-  app.post("/webhooks/razorpay", (req: Request & { rawBody?: string }, res: Response) => {
-    const signature = req.headers["x-razorpay-signature"] as string | undefined;
+  const handleWebhookPost = (req: Request & { rawBody?: string }, res: Response) => {
+    const signature = (req.headers["x-razorpay-signature"] || req.headers["stripe-signature"]) as string | undefined;
 
     // Verify HMAC signature if secret configured
     if (webhookSecret) {
       if (!signature) {
         auditLedger.append(webhookSignatureMissingEvent());
-        console.warn("Razorpay webhook received with missing X-Razorpay-Signature header");
-        res.status(401).json({ error: "Missing X-Razorpay-Signature header" });
+        const missingMsg = req.path.includes("razorpay")
+          ? "Missing X-Razorpay-Signature header"
+          : "Missing signature header";
+        console.warn(`Webhook received with ${missingMsg}`);
+        res.status(401).json({ error: missingMsg });
         return;
       }
 
       if (!req.rawBody || !verifyWebhookSignature(req.rawBody, signature, webhookSecret)) {
         auditLedger.append(webhookSignatureInvalidEvent(signature));
-        console.warn("Razorpay webhook signature verification failed");
+        console.warn("Webhook signature verification failed");
         res.status(401).json({ error: "Invalid webhook signature" });
         return;
       }
@@ -243,10 +255,14 @@ export function createWebhookApp(
         res.status(200).json(result);
       }
     } catch (err: unknown) {
-      console.error("Error processing Razorpay webhook:", err);
+      console.error("Error processing webhook:", err);
       res.status(500).json({ error: (err as Error).message });
     }
-  });
+  };
+
+  app.post("/webhooks/stripe", handleWebhookPost);
+  app.post("/webhooks/razorpay", handleWebhookPost);
+  app.post("/webhooks", handleWebhookPost);
 
   return app;
 }

@@ -16,6 +16,7 @@ import {
 } from "../audit/events.js";
 import { AuditEventType, Refinement, RefinementOption } from "../types/index.js";
 import { truncateRefinementOptions } from "../connector/refinements.js";
+import { reasoningSchema, withReasoning } from "./reasoning.js";
 
 import { PersistenceStore } from "../persistence/store.js";
 
@@ -107,6 +108,7 @@ export function registerRefinementTools(
         ),
       page: z.number().optional().default(1).describe("Page number (1-indexed)"),
       sort: z.string().optional().describe("Sort option key (e.g. 'price_asc', 'price_desc')"),
+      reasoning: reasoningSchema,
     },
     async (params) => {
       pruneSearchStates();
@@ -174,17 +176,31 @@ export function registerRefinementTools(
         });
 
         auditLedger.append(
-          toolCompletedEvent(trackId, "refine_search", {
-            new_search_id: searchResult.search_id,
-            total_results: searchResult.total_results,
-          })
+          toolCompletedEvent(
+            trackId,
+            "refine_search",
+            withReasoning(
+              {
+                new_search_id: searchResult.search_id,
+                total_results: searchResult.total_results,
+              },
+              params.reasoning
+            )
+          )
         );
 
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify({ ...searchResult, refinements: truncatedRefinements }, null, 2),
+              text: JSON.stringify(
+                withReasoning(
+                  { ...searchResult, refinements: truncatedRefinements },
+                  params.reasoning
+                ),
+                null,
+                2
+              ),
             },
           ],
         };
@@ -214,6 +230,7 @@ export function registerRefinementTools(
       query: z.string().optional().describe("Case-insensitive substring filter on option value or label"),
       page: z.number().int().positive().optional().default(1).describe("Option list page (1-indexed)"),
       page_size: z.number().int().positive().max(100).optional().default(25).describe("Page size (max 100)"),
+      reasoning: reasoningSchema,
     },
     async (params) => {
       const trackId = `opt_tool_${Date.now()}`;
@@ -269,19 +286,26 @@ export function registerRefinementTools(
             )
           );
           auditLedger.append(
-            toolCompletedEvent(trackId, "get_refinement_options", {
-              search_id: params.search_id,
-              refinement_key: params.refinement_key,
-              returned_count: slice.length,
-              source: "merchant",
-            })
+            toolCompletedEvent(
+              trackId,
+              "get_refinement_options",
+              withReasoning(
+                {
+                  search_id: params.search_id,
+                  refinement_key: params.refinement_key,
+                  returned_count: slice.length,
+                  source: "merchant",
+                },
+                params.reasoning
+              )
+            )
           );
 
           return {
             content: [
               {
                 type: "text",
-                text: JSON.stringify(responseData, null, 2),
+                text: JSON.stringify(withReasoning(responseData, params.reasoning), null, 2),
               },
             ],
           };
@@ -314,19 +338,26 @@ export function registerRefinementTools(
           )
         );
         auditLedger.append(
-          toolCompletedEvent(trackId, "get_refinement_options", {
-            search_id: params.search_id,
-            refinement_key: params.refinement_key,
-            returned_count: slice.length,
-            source: "mcp",
-          })
+          toolCompletedEvent(
+            trackId,
+            "get_refinement_options",
+            withReasoning(
+              {
+                search_id: params.search_id,
+                refinement_key: params.refinement_key,
+                returned_count: slice.length,
+                source: "mcp",
+              },
+              params.reasoning
+            )
+          )
         );
 
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify(responseData, null, 2),
+              text: JSON.stringify(withReasoning(responseData, params.reasoning), null, 2),
             },
           ],
         };

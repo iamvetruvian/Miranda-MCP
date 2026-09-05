@@ -12,6 +12,9 @@ import { AuthGuard } from "../auth/auth-guard.js";
 import { IntegrationManifest } from "../types/manifest.js";
 import { AuditLedger } from "../audit/ledger.js";
 import { toolInvokedEvent, toolCompletedEvent } from "../audit/events.js";
+import { reasoningSchema, withReasoning } from "./reasoning.js";
+
+import { RecurringTokenStore } from "../payment/token-store.js";
 
 export function registerAuthTools(
   server: McpServer,
@@ -19,17 +22,19 @@ export function registerAuthTools(
   authGuard: AuthGuard,
   manifest: IntegrationManifest,
   oauth2Handler: OAuth2Handler | null,
-  auditLedger?: AuditLedger
+  auditLedger?: AuditLedger,
+  recurringTokenStore?: RecurringTokenStore
 ): void {
   // ─── check_auth_status ───────────────────────────────────────────────────────
   server.tool(
     "check_auth_status",
-    "Check current user authentication status with this merchant. Returns whether an active user session exists, user profile info, or an authorization URL if unauthenticated. CRITICAL: If an authorization_url is returned, the agent must NOT open or automate it; present the link directly to the human user in the response.",
+    "Check current user authentication status with this merchant. Returns whether an active user session exists, user profile info, whether a vaulted payment card exists, or an authorization URL if unauthenticated. CRITICAL: If an authorization_url is returned, the agent must NOT open or automate it; present the link directly to the human user in the response.",
     {
       session_id: z
         .string()
         .optional()
         .describe("Optional specific session ID to verify. If omitted, checks for any active session."),
+      reasoning: reasoningSchema,
     },
     async (params) => {
       const trackId = `auth_status_${Date.now()}`;
@@ -49,20 +54,35 @@ export function registerAuthTools(
 
         if (validToken) {
           const freshSession = sessionStore.getSession(session.session_id);
-          const response = {
-            authenticated: true,
-            session_id: session.session_id,
-            user_id: freshSession?.user_id,
-            user_name: freshSession?.user_name,
-            user_email: freshSession?.user_email,
-            user_contact: freshSession?.user_contact,
-            session_expires_at: freshSession
-              ? new Date(freshSession.session_expires_at).toISOString()
-              : undefined,
-            token_expires_at: freshSession?.token_expires_at
-              ? new Date(freshSession.token_expires_at).toISOString()
-              : undefined,
-          };
+          const hasSavedCard = Boolean(
+            freshSession?.recurring_token ||
+            (freshSession?.customer_id && recurringTokenStore?.get(freshSession.customer_id)) ||
+            (freshSession?.user_email && recurringTokenStore?.getByEmail(freshSession.user_email)) ||
+            (recurringTokenStore && recurringTokenStore.listAll().length > 0)
+          );
+
+          const response = withReasoning(
+            {
+              authenticated: true,
+              session_id: session.session_id,
+              user_id: freshSession?.user_id,
+              user_name: freshSession?.user_name,
+              user_email: freshSession?.user_email,
+              user_contact: freshSession?.user_contact,
+              has_saved_card: hasSavedCard,
+              payment_mode: hasSavedCard ? "autonomous" : "user_action_required",
+              session_expires_at: freshSession
+                ? new Date(freshSession.session_expires_at).toISOString()
+                : undefined,
+              token_expires_at: freshSession?.token_expires_at
+                ? new Date(freshSession.token_expires_at).toISOString()
+                : undefined,
+              instructions_for_agent: hasSavedCard
+                ? "A saved payment card is securely vaulted in the Stripe PCI Vault for this user. When calling prepare_purchase, do NOT ask the user for payment details or present one-time payment links; purchases will execute autonomously via off-session S2S recurring charges."
+                : "User is authenticated. On first purchase, present both one-time payment and card vault links returned by prepare_purchase.",
+            },
+            params.reasoning
+          );
 
           if (auditLedger) {
             auditLedger.append(toolCompletedEvent(trackId, "check_auth_status", response));
@@ -77,14 +97,17 @@ export function registerAuthTools(
       // Not authenticated — provide login instructions if OAuth2 is supported
       if (oauth2Handler) {
         const login = oauth2Handler.initiateLogin();
-        const response = {
-          authenticated: false,
-          authorization_url: login.authorization_url,
-          session_id: login.session_id,
-          instructions_for_agent:
-            "CRITICAL: Do NOT attempt to visit, open, or automate this authorization_url yourself via browser tools. You MUST present this link directly to the human user in your response message so they can log in via their browser.",
-          message: `User is not currently authenticated with ${manifest.merchant.name}. Do NOT open this URL yourself. Provide this authorization_url directly to the user in your message so they can authorize access in their browser.`,
-        };
+        const response = withReasoning(
+          {
+            authenticated: false,
+            authorization_url: login.authorization_url,
+            session_id: login.session_id,
+            instructions_for_agent:
+              "CRITICAL: Do NOT attempt to visit, open, or automate this authorization_url yourself via browser tools. You MUST present this link directly to the human user in your response message so they can log in via their browser.",
+            message: `User is not currently authenticated with ${manifest.merchant.name}. Do NOT open this URL yourself. Provide this authorization_url directly to the user in your message so they can authorize access in their browser.`,
+          },
+          params.reasoning
+        );
 
         if (auditLedger) {
           auditLedger.append(toolCompletedEvent(trackId, "check_auth_status", response));
@@ -95,10 +118,13 @@ export function registerAuthTools(
         };
       }
 
-      const response = {
-        authenticated: false,
-        message: `User is not authenticated, and OAuth2 user login is not configured for ${manifest.merchant.name}.`,
-      };
+      const response = withReasoning(
+        {
+          authenticated: false,
+          message: `User is not authenticated, and OAuth2 user login is not configured for ${manifest.merchant.name}.`,
+        },
+        params.reasoning
+      );
 
       if (auditLedger) {
         auditLedger.append(toolCompletedEvent(trackId, "check_auth_status", response));
@@ -114,7 +140,9 @@ export function registerAuthTools(
   server.tool(
     "request_login",
     "Request a merchant OAuth2 authorization URL for the user to log in or link their account. Returns an authorization_url. CRITICAL: The agent must NOT open or automate this URL; present it directly to the human user in the response.",
-    {},
+    {
+      reasoning: reasoningSchema,
+    },
     async (params) => {
       const trackId = `auth_login_${Date.now()}`;
       if (auditLedger) {
@@ -140,14 +168,17 @@ export function registerAuthTools(
       }
 
       const login = oauth2Handler.initiateLogin();
-      const response = {
-        status: "login_initiated",
-        authorization_url: login.authorization_url,
-        session_id: login.session_id,
-        instructions_for_agent:
-          "CRITICAL: Do NOT attempt to visit, open, or automate this authorization_url yourself via browser tools. You MUST present this link directly to the human user in your response message so they can log in via their browser.",
-        message: `Do NOT open this URL yourself. Provide this authorization_url directly to the human user in your response so they can log in to ${manifest.merchant.name} in their browser. Once completed, subsequent operations using session_id "${login.session_id}" will be authorized.`,
-      };
+      const response = withReasoning(
+        {
+          status: "login_initiated",
+          authorization_url: login.authorization_url,
+          session_id: login.session_id,
+          instructions_for_agent:
+            "CRITICAL: Do NOT attempt to visit, open, or automate this authorization_url yourself via browser tools. You MUST present this link directly to the human user in your response message so they can log in via their browser.",
+          message: `Do NOT open this URL yourself. Provide this authorization_url directly to the human user in your response so they can log in to ${manifest.merchant.name} in their browser. Once completed, subsequent operations using session_id "${login.session_id}" will be authorized.`,
+        },
+        params?.reasoning
+      );
 
       if (auditLedger) {
         auditLedger.append(toolCompletedEvent(trackId, "request_login", response));
@@ -170,6 +201,7 @@ export function registerAuthTools(
         .describe(
           "Optional session ID to terminate. If omitted, terminates the current active session."
         ),
+      reasoning: reasoningSchema,
     },
     async (params) => {
       const trackId = `auth_logout_${Date.now()}`;
@@ -183,13 +215,16 @@ export function registerAuthTools(
         sessionStore.invalidateSession(targetId);
       }
 
-      const response = {
-        status: "logged_out",
-        session_id: targetId,
-        message: targetId
-          ? `User session "${targetId}" has been invalidated successfully.`
-          : "No active session was found to invalidate.",
-      };
+      const response = withReasoning(
+        {
+          status: "logged_out",
+          session_id: targetId,
+          message: targetId
+            ? `User session "${targetId}" has been invalidated successfully.`
+            : "No active session was found to invalidate.",
+        },
+        params.reasoning
+      );
 
       if (auditLedger) {
         auditLedger.append(toolCompletedEvent(trackId, "logout", response));
