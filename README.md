@@ -4,6 +4,11 @@
 > Every money action is **explainable, bounded, and gated** with a tamper-evident, SHA-256 hash-chained audit trail and periodic cryptographic checkpoints.
 
 ---
+## Architecture (Userflow-1: First time setup)
+<img width="2640" height="1485" alt="image" src="https://github.com/user-attachments/assets/192b41dd-b7e6-44d1-a386-7a21aeb86447" />
+
+
+---
 
 ## Key Features
 
