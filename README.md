@@ -5,7 +5,7 @@
 
 ---
 ## Architecture (Userflow-1: First time setup)
-<img width="2640" height="1485" alt="image" src="https://github.com/user-attachments/assets/192b41dd-b7e6-44d1-a386-7a21aeb86447" />
+<img width="2640" height="1485" alt="image" src="https://github.com/user-attachments/assets/23d3fd73-9d8a-4e66-9292-1505edaae070" />
 
 
 ---
